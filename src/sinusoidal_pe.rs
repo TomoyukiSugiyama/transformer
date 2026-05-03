@@ -22,7 +22,6 @@ impl SinusoidalPE {
 
     pub fn forward(&self, token_enb: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let seq_len = token_enb.len();
-        println!("seq_len: {seq_len}, teble_len={}",self.table.len());
         assert!(seq_len <= self.table.len(), "seq_len exceeded max_len");
         token_enb
             .iter()

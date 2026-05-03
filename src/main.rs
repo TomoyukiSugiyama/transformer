@@ -1,9 +1,22 @@
 mod embedding;
 mod sinusoidal_pe;
 mod tokenizer;
-use crate::{embedding::Embedding, sinusoidal_pe::SinusoidalPE, tokenizer::*};
+
+mod multi_head_attention;
+mod utility;
+
+use crate::{
+    embedding::Embedding,
+    multi_head_attention::{MultiHeadAttention, causal_mask},
+    sinusoidal_pe::SinusoidalPE,
+    tokenizer::*,
+};
 
 fn main() {
+    let d_model = 8;
+    let n_heads = 2;
+    let seq_len = 9;
+
     let corpus = vec!["Hello, world!", "Attention Is All You Need"];
 
     let tokenizer = Tokenizer::build(&corpus);
@@ -15,27 +28,40 @@ fn main() {
 
     token_ids = tokenizer.encode("Hello, world!Attention Is All You Need");
     println!(
-        "Token Ids(Hello, world!Attention Is All You Need): {:?}",
+        "Token Ids (Hello, world!Attention Is All You Need): {:?}",
         token_ids
     );
 
-    let d_model = 4;
     let embedding = Embedding::new(tokenizer.vocab_size(), d_model);
 
     let token_enb = embedding.forward(&token_ids);
-    println!(
-        "Embedding matrix (seq_len={}, d_model={}):",
-        token_ids.len(),
-        d_model
-    );
+    println!("Embedding matrix (seq_len={seq_len}, d_model={d_model}):");
     for (i, vec) in token_enb.iter().enumerate() {
         println!("[{i}] {:?}", vec);
     }
 
     let sin_pe = SinusoidalPE::new(512, d_model);
-    let output = sin_pe.forward(&token_enb);
+    let x = sin_pe.forward(&token_enb);
     println!("Sinusoidal Position Encording:");
+    for (i, o) in x.iter().enumerate() {
+        println!("[{i}] {:?}", o);
+    }
+
+    let mha = MultiHeadAttention::new(d_model, n_heads);
+    let mask = causal_mask(seq_len);
+
+    let (output, attention_waight) = mha.forward(&x, Some(&mask));
+
+    println!("Output Shape: [{}, {}]", output.len(), output[0].len());
+
+    println!("Output:");
     for (i, o) in output.iter().enumerate() {
         println!("[{i}] {:?}", o);
+    }
+
+    println!("Attention weights [head=0]:");
+    for (i, row) in attention_waight[0].iter().enumerate() {
+        let formatted: Vec<String> = row.iter().map(|w| format!("{:.2}", w)).collect();
+        println!("pos[{i}] {}", formatted.join(", "));
     }
 }
