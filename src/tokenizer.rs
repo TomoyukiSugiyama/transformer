@@ -1,11 +1,19 @@
 use std::collections::HashMap;
 pub struct Tokenizer {
     vocab: HashMap<String, usize>,
+    unk_id: usize
 }
 
 impl Tokenizer {
+    pub const UNK: &'static str = "<UNK>";
+
     pub fn build(corpus: &[&str]) -> Self {
         let mut vocab: HashMap<String, usize> = HashMap::new();
+
+        for special in [Self::UNK] {
+            vocab.insert(special.to_string(), vocab.len());
+        }
+
         for text in corpus {
             let tokens = Self::tokenize_text(text);
             for token in tokens {
@@ -14,8 +22,8 @@ impl Tokenizer {
                 }
             }
         }
-        println!("{:?}",vocab);
-        Self { vocab }
+        let unk_id:usize = *vocab.get(Self::UNK).unwrap();
+        Self { vocab, unk_id }
     }
 
     fn tokenize_text(text: &str) -> Vec<String> {
@@ -25,7 +33,7 @@ impl Tokenizer {
         for ch in text.chars() {
             if ch.is_alphanumeric() || ch == '\'' {
                 current.push(ch);
-            }else {
+            } else {
                 if !current.is_empty() {
                     tokens.push(current.clone());
                     current.clear();
@@ -39,11 +47,20 @@ impl Tokenizer {
         if !current.is_empty() {
             tokens.push(current);
         }
-        println!("{:?}",tokens);
         tokens
     }
 
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
+    }
+
+    pub fn encode(&self, text: &str) -> Vec<usize> {
+        let mut ids = vec![];
+        let tokens = Self::tokenize_text(text);
+
+        for token in tokens {
+            ids.push(self.vocab.get(&token).copied().unwrap_or(self.unk_id));
+        }
+        ids
     }
 }
