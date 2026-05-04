@@ -1,7 +1,7 @@
 use rand::RngExt;
 use rand::rng;
 
-pub struct FFN {
+pub struct FeedForwardNetwork {
     w1: Vec<Vec<f32>>,
     b1: Vec<f32>,
     w2: Vec<Vec<f32>>,
@@ -10,7 +10,7 @@ pub struct FFN {
     d_ff: usize,
 }
 
-impl FFN {
+impl FeedForwardNetwork {
     pub fn new(d_model: usize, d_ff: usize) -> Self {
         let mut rng = rng();
         let scale_model = (2.0 / d_model as f32).sqrt();

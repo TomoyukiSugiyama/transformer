@@ -32,12 +32,3 @@ impl LayerNormalization {
     }
 }
 
-pub fn add_and_norm(x: &[Vec<f32>], sublayer_out: &[Vec<f32>], norm: &LayerNormalization) -> Vec<Vec<f32>>{
-    let added: Vec<Vec<f32>> = x
-        .iter()
-        .zip(sublayer_out.iter())
-        .map(|(xi, si)| xi.iter().zip(si.iter()).map(|(a, b)| a + b).collect())
-        .collect();
-
-    norm.forward(&added)
-}
