@@ -29,7 +29,7 @@ fn main() {
     let d_ff = d_model * 4;
     let n_heads = 2;
     let n_layers = 2;
-    let seq_len = 9;
+    let seq_len = 8;
 
     let corpus = vec!["Hello, world!", "Attention Is All You Need"];
 
@@ -39,18 +39,18 @@ fn main() {
     println!("Corpus: {:?}", corpus);
     println!("Vocab Size: {}", vocab_size);
 
-    let mut token_ids = tokenizer.encode("unknown word");
-    println!("Token Ids (Unknown Word): {:?}", token_ids);
+    let mut enc = tokenizer.encode_with_padding("unknown word", seq_len);
+    println!("Token Ids (Unknown Word): {:?}", enc.input_ids);
 
-    token_ids = tokenizer.encode("Hello, world!Attention Is All You Need");
+    enc = tokenizer.encode_with_padding("Hello, world!Attention Is All You Need", seq_len);
     println!(
         "Token Ids (Hello, world!Attention Is All You Need): {:?}",
-        token_ids
+        enc.input_ids
     );
 
     // Token Embedding
     let embedding = Embedding::new(vocab_size, d_model);
-    let token_enb = embedding.forward(&token_ids);
+    let token_enb = embedding.forward(&enc.input_ids);
     println!("Token Embedding:");
     println!(
         "Output Shape: [{}, {}]",
@@ -61,10 +61,10 @@ fn main() {
         println!("[{i}] {:?}", vec);
     }
 
-    // Positional Encording
+    // Positional Encoding
     let sin_pe = SinusoidalPE::new(512, d_model);
     let x = sin_pe.forward(&token_enb);
-    println!("Sinusoidal Positional Encording:");
+    println!("Sinusoidal Positional Encoding:");
     println!("Output Shape: [{}, {}]", x.len(), x[0].len());
     for (i, o) in x.iter().enumerate() {
         println!("[{i}] {:?}", o);
@@ -84,12 +84,47 @@ fn main() {
 
     // Output Heads
     let heads = OutputHead::new(d_model, vocab_size);
-    let last_real_pos = token_ids.len() - 1;
+    let last_real_pos = enc
+        .attention_mask
+        .iter()
+        .rposition(|&m| m == 1)
+        .unwrap_or(0);
     let logits = heads.logit_last(&hidden[last_real_pos]);
     let probs = OutputHead::softmax(&logits);
-    println!("{:?}", probs);
 
     let next_id = OutputHead::greedy(&probs);
     let next_token = tokenizer.id_to_token_str(next_id).unwrap_or("<UNK>");
-    println!("Next Token Greedy (id={next_id}): {next_token}")
+    println!("Next Token Greedy (id={next_id}): {next_token}");
+
+    // Top-3 predictions
+    let mut sorted: Vec<(usize, f32)> = probs.iter().cloned().enumerate().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    for (id, prob) in sorted.iter().take(3) {
+        let token = tokenizer.id_to_token_str(*id).unwrap_or("<UNK>");
+        println!("[{:10}] id={:3}) {:.4}", token, id, prob);
+    }
+
+    // Auto regressive
+    println!("Auto regressive:");
+    let mut generated_ids = tokenizer.encode_simple("hello");
+    let max_gen = 5;
+    println!("{:?}", generated_ids);
+    for step in 0..max_gen {
+        let enc = tokenizer.encode_with_padding_from_ids(&generated_ids, seq_len);
+        let x = sin_pe.forward(&embedding.forward(&enc.input_ids));
+        let hidden = transformer.forward(&x, Some(&causal_mask(seq_len)));
+
+        let last_pos = generated_ids.len().min(seq_len) - 1;
+        let logits = heads.logit_last(&hidden[last_pos]);
+        let next_id = OutputHead::top_k_sample(&logits, 5, 0.8);
+        let next_token = tokenizer.id_to_token_str(next_id).unwrap_or("<UNK>");
+        println!(" step[{step}]: next={next_token} (id={next_id})");
+
+        if next_token == Tokenizer::EOS {
+            break;
+        }
+        generated_ids.push(next_id);
+    }
+    let generated_text = tokenizer.decord(&generated_ids);
+    println!("Generated: {generated_text}")
 }

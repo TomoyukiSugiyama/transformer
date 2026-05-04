@@ -53,6 +53,26 @@ impl OutputHead {
             .unwrap()
     }
 
+    pub fn top_k_sample(logits: &[f32], k: usize, temperature: f32) -> usize {
+        let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed.truncate(k);
+
+        let top_logits: Vec<f32> = indexed.iter().map(|(_, l)| l / temperature).collect();
+        let probes = Self::softmax(&top_logits);
+        let mut rng = rng();
+        let r: f32 = rng.random_range(0.0..1.0);
+        let mut custom = 0.0;
+
+        for (idx, &p) in probes.iter().enumerate() {
+            custom += p;
+            if r < custom {
+                return indexed[idx].0;
+            }
+        }
+        indexed[0].0
+    }
+
     pub fn forward(&self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
         hidden
             .iter()
