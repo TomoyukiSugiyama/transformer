@@ -77,12 +77,15 @@ impl Tokenizer {
     }
 
     fn encode(&self, text: &str) -> Vec<usize> {
-        let mut ids = vec![];
+        let bos = *self.vocab.get(Self::BOS).unwrap();
+        let eos = *self.vocab.get(Self::EOS).unwrap();
+        let mut ids = vec![bos];
         let tokens = Self::tokenize_text(text);
 
         for token in tokens {
             ids.push(self.vocab.get(&token).copied().unwrap_or(self.unk_id));
         }
+        ids.push(eos);
         ids
     }
 
@@ -101,11 +104,17 @@ impl Tokenizer {
 
     pub fn encode_with_padding(&self, text: &str, max_len: usize) -> Encoding {
         let pad_id = *self.vocab.get(Self::PAD).unwrap_or(&0);
+        let eos_id = *self.vocab.get(Self::EOS).unwrap_or(&0);
         let mut input_ids = self.encode(text);
+
+        if input_ids.len() >= max_len {
+            input_ids.truncate(max_len - 1);
+            input_ids.push(eos_id);
+        } else {
+            input_ids.resize(max_len, pad_id);
+        }
+        
         let real_len = input_ids.len().min(max_len);
-
-        input_ids.resize(max_len, pad_id);
-
         let mut attention_mask = vec![1u8; real_len];
         attention_mask.resize(max_len, 0u8);
 
@@ -122,10 +131,11 @@ impl Tokenizer {
         let real_len = ids.len().min(max_len);
         let mut input_ids = ids[..real_len].to_vec();
 
-        if input_ids.len() < max_len {
-            input_ids.resize(max_len, pad_id);
+        if input_ids.len() >= max_len {
+            input_ids.truncate(max_len - 1);
+            input_ids.push(eos_id);
         } else {
-            *input_ids.last_mut().unwrap() = eos_id;
+            input_ids.resize(max_len, pad_id);
         }
 
         let mut attention_mask = vec![1u8; real_len];
