@@ -13,18 +13,62 @@ mod transformer_block;
 
 mod output_head;
 
+mod cross_entropy_loss;
+
 use crate::{
-    embedding::Embedding,
-    feed_forward_network::FeedForwardNetwork,
-    layer_normalization::LayerNormalization,
-    multi_head_attention::{MultiHeadAttention, causal_mask},
-    output_head::OutputHead,
-    sinusoidal_pe::SinusoidalPE,
-    tokenizer::*,
-    transformer::Transformer,
+    cross_entropy_loss::CrossEntropyLoss, embedding::Embedding, feed_forward_network::FeedForwardNetwork, layer_normalization::LayerNormalization, multi_head_attention::{MultiHeadAttention, causal_mask}, output_head::OutputHead, sinusoidal_pe::SinusoidalPE, tokenizer::*, transformer::Transformer
 };
 
 fn main() {
+    let corpus = vec!["hello world rust transformer"];
+    let d_model = 8;
+    let d_ff = d_model * 4;
+    let n_heads = 2;
+    let n_layers = 2;
+    let seq_len = 8;
+    
+    let tokenizer = Tokenizer::build(&corpus);
+    let vocab_size = tokenizer.vocab_size();
+    let embedding = Embedding::new(vocab_size, d_model);
+    let pe = SinusoidalPE::new(512, d_model);
+    let transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
+    let head = OutputHead::new(d_model, vocab_size);
+
+    let text = "hello world rust";
+    let enc =tokenizer.encode_with_padding(text, seq_len);
+
+    let (input_ids,targets,target_mask) = make_lm_pair(&enc);
+
+    let x = pe.forward(&embedding.forward(&input_ids));
+    let mask = causal_mask(seq_len);
+    let hidden = transformer.forward(&x, Some(&mask));
+    let logits = head.forward(&hidden);
+
+    let (loss,grad) = CrossEntropyLoss::forward_sequence(&logits, &targets, &target_mask);
+
+    println!("Loss {:.4}",loss);
+    let theorical = (tokenizer.vocab_size() as f32).ln();
+    println!("理論初期Loss: {:.4}",theorical);
+
+    println!("grad shape: ({}, {})",grad.len(),grad[0].len());
+    println!("grad[0] norm: {:.6}",grad[0].iter().map(|v| v.powi(2)).sum::<f32>().sqrt());
+
+}
+
+fn make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
+    let ids = &enc.input_ids;
+    let mask = &enc.attention_mask;
+    let len = ids.len();
+
+    let inputs = ids[..len - 1].to_vec();
+    let targets = ids[1..].to_vec();
+
+    let target_mask = mask[1..].to_vec();
+
+    (inputs, targets, target_mask)
+}
+
+fn _predict(){
     let d_model = 8;
     let d_ff = d_model * 4;
     let n_heads = 2;
