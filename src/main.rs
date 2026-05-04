@@ -5,8 +5,11 @@ mod tokenizer;
 mod multi_head_attention;
 mod utility;
 
+mod layer_normalization;
+
 use crate::{
     embedding::Embedding,
+    layer_normalization::{LayerNormalization, add_and_norm},
     multi_head_attention::{MultiHeadAttention, causal_mask},
     sinusoidal_pe::SinusoidalPE,
     tokenizer::*,
@@ -50,12 +53,12 @@ fn main() {
     let mha = MultiHeadAttention::new(d_model, n_heads);
     let mask = causal_mask(seq_len);
 
-    let (output, attention_waight) = mha.forward(&x, Some(&mask));
+    let (attn_output, attention_waight) = mha.forward(&x, Some(&mask));
 
-    println!("Output Shape: [{}, {}]", output.len(), output[0].len());
+    println!("Attention Output Shape: [{}, {}]", attn_output.len(), attn_output[0].len());
 
-    println!("Output:");
-    for (i, o) in output.iter().enumerate() {
+    println!("Attention Output:");
+    for (i, o) in attn_output.iter().enumerate() {
         println!("[{i}] {:?}", o);
     }
 
@@ -64,4 +67,14 @@ fn main() {
         let formatted: Vec<String> = row.iter().map(|w| format!("{:.2}", w)).collect();
         println!("pos[{i}] {}", formatted.join(", "));
     }
+
+    let norm = LayerNormalization::new(d_model);
+    let x = add_and_norm(&x, &attn_output, &norm);
+    println!("Add and Normalization:");
+    for (i, o) in x.iter().enumerate() {
+        let n = o.len() as f32;
+        let mean = o.iter().sum::<f32>() / n;
+        let var = o.iter().map(|v| (v - mean).powi(2)).sum::<f32>();
+        println!("[{i},m≒{:.2},v≒{:.2}]{:?}", mean,var,o);
+    }  
 }
