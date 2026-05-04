@@ -10,7 +10,7 @@ pub struct MultiHeadAttention {
     w_o: Vec<Vec<f32>>,
     n_heads: usize,
     d_model: usize,
-    d_heads: usize,
+    d_head: usize,
 }
 
 impl MultiHeadAttention {
@@ -19,7 +19,7 @@ impl MultiHeadAttention {
             d_model % n_heads == 0,
             "d_model must to dibisible by n_heads"
         );
-        let d_heads = d_model / n_heads;
+        let d_head = d_model / n_heads;
         let mut rng = rng();
         let scale = (1.0 / d_model as f32).sqrt();
         let mut rand_matrix = |raws: usize, cols: usize| -> Vec<Vec<f32>> {
@@ -35,7 +35,7 @@ impl MultiHeadAttention {
             w_o: rand_matrix(d_model, d_model),
             n_heads,
             d_model,
-            d_heads,
+            d_head,
         }
     }
 
@@ -44,7 +44,7 @@ impl MultiHeadAttention {
             .map(|h| {
                 let start = h * self.n_heads;
                 x.iter()
-                    .map(|row| row[start..start + self.d_heads].to_vec())
+                    .map(|row| row[start..start + self.d_head].to_vec())
                     .collect()
             })
             .collect()

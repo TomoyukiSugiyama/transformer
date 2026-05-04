@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 pub struct Tokenizer {
     vocab: HashMap<String, usize>,
-    unk_id: usize
+    id_to_token: Vec<String>,
+    unk_id: usize,
 }
 
 impl Tokenizer {
@@ -22,8 +23,17 @@ impl Tokenizer {
                 }
             }
         }
-        let unk_id:usize = *vocab.get(Self::UNK).unwrap();
-        Self { vocab, unk_id }
+        let mut id_to_token = vec![String::new(); vocab.len()];
+        for (token, &id) in &vocab {
+            id_to_token[id] = token.clone();
+        }
+
+        let unk_id: usize = *vocab.get(Self::UNK).unwrap();
+        Self {
+            vocab,
+            id_to_token,
+            unk_id,
+        }
     }
 
     fn tokenize_text(text: &str) -> Vec<String> {
@@ -52,6 +62,10 @@ impl Tokenizer {
 
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
+    }
+
+    pub fn id_to_token_str(&self,id:usize) -> Option<&str>{
+        self.id_to_token.get(id).map(String::as_str)
     }
 
     pub fn encode(&self, text: &str) -> Vec<usize> {
