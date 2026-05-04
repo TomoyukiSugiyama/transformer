@@ -6,17 +6,15 @@ mod multi_head_attention;
 mod utility;
 
 mod layer_normalization;
+mod feed_forward_network;
 
 use crate::{
-    embedding::Embedding,
-    layer_normalization::{LayerNormalization, add_and_norm},
-    multi_head_attention::{MultiHeadAttention, causal_mask},
-    sinusoidal_pe::SinusoidalPE,
-    tokenizer::*,
+    embedding::Embedding, feed_forward_network::FFN, layer_normalization::{LayerNormalization, add_and_norm}, multi_head_attention::{MultiHeadAttention, causal_mask}, sinusoidal_pe::SinusoidalPE, tokenizer::*
 };
 
 fn main() {
     let d_model = 8;
+    let d_ff = d_model * 4;
     let n_heads = 2;
     let seq_len = 9;
 
@@ -68,13 +66,31 @@ fn main() {
         println!("pos[{i}] {}", formatted.join(", "));
     }
 
-    let norm = LayerNormalization::new(d_model);
-    let x = add_and_norm(&x, &attn_output, &norm);
+    let norm1 = LayerNormalization::new(d_model);
+    let x = add_and_norm(&x, &attn_output, &norm1);
     println!("Add and Normalization:");
     for (i, o) in x.iter().enumerate() {
         let n = o.len() as f32;
         let mean = o.iter().sum::<f32>() / n;
         let var = o.iter().map(|v| (v - mean).powi(2)).sum::<f32>();
         println!("[{i},m≒{:.2},v≒{:.2}]{:?}", mean,var,o);
-    }  
+    }
+
+    let ffn = FFN::new(d_model, d_ff);
+    let ffn_out = ffn.forward(&x);
+    println!("Feed Forward Network Output:");
+    for (i, o) in ffn_out.iter().enumerate() {
+        println!("[{i}] {:?}", o);
+    }
+
+    let norm2 = LayerNormalization::new(d_model);
+    let x = add_and_norm(&x, &ffn_out, &norm2);
+    println!("Add and Normalization:");
+    for (i, o) in x.iter().enumerate() {
+        let n = o.len() as f32;
+        let mean = o.iter().sum::<f32>() / n;
+        let var = o.iter().map(|v| (v - mean).powi(2)).sum::<f32>();
+        println!("[{i},m≒{:.2},v≒{:.2}]{:?}", mean,var,o);
+    }    
+
 }
