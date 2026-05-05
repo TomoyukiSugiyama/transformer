@@ -85,12 +85,4 @@ impl Embedding {
             );
         }
     }
-
-    pub fn weight_norm(&self, token_id: usize) -> f32 {
-        self.weight[token_id]
-            .iter()
-            .map(|v| v.powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
 }

@@ -5,7 +5,6 @@ use crate::{
 pub struct Transformer {
     blocks: Vec<TransformerBlock>,
     final_norm: LayerNormalization,
-    d_model: usize,
 }
 
 impl Transformer {
@@ -15,7 +14,6 @@ impl Transformer {
                 .map(|_| TransformerBlock::new(d_model, n_heads, d_ff))
                 .collect(),
             final_norm: LayerNormalization::new(d_model),
-            d_model,
         }
     }
 

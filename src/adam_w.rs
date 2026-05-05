@@ -40,15 +40,6 @@ impl AdamWParam {
             self.data[i] -= lr * (m_hat / (v_hat.sqrt() + eps) + wd * self.data[i]);
         }
     }
-
-    pub fn from_matrix(mat: &Vec<Vec<f32>>) -> Self {
-        let flat: Vec<f32> = mat.iter().flat_map(|row| row.iter().cloned()).collect();
-        Self::new(flat)
-    }
-
-    pub fn to_matrix(&self, rows: usize, cols: usize) -> Vec<Vec<f32>> {
-        self.data.chunks(cols).map(|c| c.to_vec()).collect()
-    }
 }
 
 pub struct AdamW {
@@ -72,33 +63,6 @@ impl AdamW {
             step_count: 0,
             moments: HashMap::new(),
         }
-    }
-
-    pub fn step(&mut self, params: &mut [AdamWParam], grads: &[Vec<f32>]) {
-        self.step_count += 1;
-        for (param, grad) in params.iter_mut().zip(grads.iter()) {
-            param.step(
-                grad,
-                self.step_count,
-                self.lr,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.wd,
-            );
-        }
-    }
-    pub fn step_one(&mut self, param: &mut AdamWParam, grad: &[f32]) {
-        self.step_count += 1;
-        param.step(
-            grad,
-            self.step_count,
-            self.lr,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.wd,
-        );
     }
 
     pub fn step_matrix(&mut self, param_id: &str, w: &mut Vec<Vec<f32>>, grad: &[Vec<f32>]) {

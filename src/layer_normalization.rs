@@ -100,12 +100,4 @@ impl LayerNormalization {
         );
         opt.step_vector(&format!("{prefix}.beta"), &mut self.beta, &self.grad_beta);
     }
-
-    pub fn grad_gamma_norm(&self) -> f32 {
-        self.grad_gamma
-            .iter()
-            .map(|v| v.powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
 }

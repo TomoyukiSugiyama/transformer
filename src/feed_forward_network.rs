@@ -188,22 +188,4 @@ impl FeedForwardNetwork {
         );
         self.b2 = b2_mat.remove(0);
     }
-
-    pub fn grad_w1_norm(&self) -> f32 {
-        self.grad_w1
-            .iter()
-            .flat_map(|r| r.iter())
-            .map(|v| v.powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
-
-    pub fn dl_dx_norm(dl_dx: &[Vec<f32>]) -> f32 {
-        dl_dx
-            .iter()
-            .flat_map(|r| r.iter())
-            .map(|v| v.powi(2))
-            .sum::<f32>()
-            .sqrt()
-    }
 }
