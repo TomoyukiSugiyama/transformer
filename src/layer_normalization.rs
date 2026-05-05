@@ -31,4 +31,3 @@ impl LayerNormalization {
         x.iter().map(|row| self.normalization(row)).collect()
     }
 }
-

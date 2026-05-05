@@ -33,20 +33,22 @@ use rand::RngExt;
 
 fn main() {
     let vocab_size = 8;
-    let d_model    = 8;
-    let seq_len    = 7;  // make_lm_pair後の長さ
+    let d_model = 8;
+    let seq_len = 7; // make_lm_pair後の長さ
 
     let mut head = OutputHead::new(d_model, vocab_size);
-    let mut opt  = AdamW::new(1e-2);
+    let mut opt = AdamW::new(1e-2);
 
     // ダミーの hidden: (seq_len, d_model)
     let mut rng = rand::rng();
     let hidden: Vec<Vec<f32>> = (0..seq_len)
-        .map(|_| (0..d_model)
-            .map(|_| rng.random_range(-1.0..1.0f32))
-            .collect())
+        .map(|_| {
+            (0..d_model)
+                .map(|_| rng.random_range(-1.0..1.0f32))
+                .collect()
+        })
         .collect();
-    let targets    = vec![4usize; seq_len];
+    let targets = vec![4usize; seq_len];
     let target_mask = vec![1u8; seq_len];
 
     println!("=== OutputHead backward（シーケンス対応版）===");
@@ -55,9 +57,8 @@ fn main() {
         let logits: Vec<Vec<f32>> = head.forward(&hidden);
 
         // 2. Loss
-        let (loss, dl_dlogits) = CrossEntropyLoss::forward_sequence(
-            &logits, &targets, &target_mask
-        );
+        let (loss, dl_dlogits) =
+            CrossEntropyLoss::forward_sequence(&logits, &targets, &target_mask);
 
         // 3. Backward: dL/dW を内部に保存
         let _dl_dhidden = head.backward(&dl_dlogits);
@@ -66,11 +67,15 @@ fn main() {
         head.apply_gradients(&mut opt);
 
         if step % 5 == 0 {
-            let avg_prob: f32 = logits.iter()
+            let avg_prob: f32 = logits
+                .iter()
                 .map(|l| OutputHead::softmax(l)[4])
-                .sum::<f32>() / seq_len as f32;
-            println!("step {:2}  loss: {:.4}  avg_prob[target]: {:.4}",
-                step, loss, avg_prob);
+                .sum::<f32>()
+                / seq_len as f32;
+            println!(
+                "step {:2}  loss: {:.4}  avg_prob[target]: {:.4}",
+                step, loss, avg_prob
+            );
         }
     }
 }

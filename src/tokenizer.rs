@@ -113,7 +113,7 @@ impl Tokenizer {
         } else {
             input_ids.resize(max_len, pad_id);
         }
-        
+
         let real_len = input_ids.len().min(max_len);
         let mut attention_mask = vec![1u8; real_len];
         attention_mask.resize(max_len, 0u8);

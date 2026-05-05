@@ -17,12 +17,17 @@ impl Transformer {
         }
     }
 
-    pub fn forward(&self,x: &[Vec<f32>],mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>>{
+    pub fn forward(&self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
         let mut x = x.to_vec();
         for (i, block) in self.blocks.iter().enumerate() {
             x = block.forward(&x, mask);
-            let norm:f32 = x.iter().flat_map(|row| row.iter()).map(|v| v.powi(2)).sum::<f32>().sqrt();
-            println!("Block[{i}] output norm {:.4}",norm);
+            let norm: f32 = x
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|v| v.powi(2))
+                .sum::<f32>()
+                .sqrt();
+            println!("Block[{i}] output norm {:.4}", norm);
         }
         self.final_norm.forward(&x)
     }
