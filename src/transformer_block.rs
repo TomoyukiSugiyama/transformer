@@ -21,7 +21,7 @@ impl TransformerBlock {
     }
 
     /// Pre-LN方式
-    pub fn forward(&self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
         let norm1 = self.norm1.forward(x);
         let (attn_out, _) = self.mha.forward(&norm1, mask);
         let x = residual_add(x, &attn_out);

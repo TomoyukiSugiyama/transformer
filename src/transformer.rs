@@ -17,10 +17,11 @@ impl Transformer {
         }
     }
 
-    pub fn forward(&self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
         let mut x = x.to_vec();
-        for (i, block) in self.blocks.iter().enumerate() {
-            x = block.forward(&x, mask);
+        for i in 0..self.blocks.len(){
+        // for (i, block) in self.blocks.iter().enumerate() {
+            x = self.blocks[i].forward(&x, mask);
             let norm: f32 = x
                 .iter()
                 .flat_map(|row| row.iter())
