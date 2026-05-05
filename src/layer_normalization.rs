@@ -2,6 +2,12 @@ pub struct LayerNormalization {
     gamma: Vec<f32>,
     beta: Vec<f32>,
     eps: f32,
+
+    grad_gamma: Vec<f32>, // [d_model]
+    grad_beta: Vec<f32>,  // [d_model]
+
+    cache_x_hat: Vec<Vec<f32>>, // [seq_len, d_model]
+    cache_inv_std: Vec<f32>,    // [seq_len] — 1/σ
 }
 
 impl LayerNormalization {
@@ -10,24 +16,92 @@ impl LayerNormalization {
             gamma: vec![1.0; d_model],
             beta: vec![0.0; d_model],
             eps: 1e-6,
+            grad_gamma: vec![1.0; d_model],
+            grad_beta: vec![0.0; d_model],
+            cache_x_hat: Vec::new(),
+            cache_inv_std: Vec::new(),
         }
     }
 
-    fn normalization(&self, x: &[f32]) -> Vec<f32> {
+    fn normalization(&mut self, x: &[f32]) -> Vec<f32> {
         let n = x.len() as f32;
         let mean = x.iter().sum::<f32>() / n;
-        let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>();
+        let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
+        let inv_std = 1.0 / (var + self.eps).sqrt();
 
-        x.iter()
+        let x_hat: Vec<f32> = x.iter().map(|v| (v - mean) / inv_std).collect();
+
+        let y: Vec<f32> = x_hat
+            .iter()
             .enumerate()
-            .map(|(i, v)| {
-                let x_hat = (v - mean) / (var + self.eps).sqrt();
-                self.gamma[i] * x_hat + self.beta[i]
-            })
-            .collect()
+            .map(|(i, xh)| self.gamma[i] * xh + self.beta[i])
+            .collect();
+
+        self.cache_x_hat.push(x_hat);
+        self.cache_inv_std.push(inv_std);
+
+        y
     }
 
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.cache_x_hat.clear();
+        self.cache_inv_std.clear();
+
         x.iter().map(|row| self.normalization(row)).collect()
+    }
+
+    /// dl_dy: [seq_len, d_model]
+    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let d = self.gamma.len() as f32;
+
+        self.grad_gamma = vec![0.0; self.gamma.len()];
+        self.grad_beta = vec![0.0; self.beta.len()];
+
+        for (dy_row, xh_row) in dl_dy.iter().zip(self.cache_x_hat.iter()) {
+            for j in 0..self.gamma.len() {
+                self.grad_gamma[j] += dy_row[j] * xh_row[j];
+                self.grad_beta[j] += dy_row[j];
+            }
+        }
+
+        let mut dl_dx = Vec::with_capacity(dl_dy.len());
+        for (i, dy_row) in dl_dy.iter().enumerate() {
+            let inv_std = self.cache_inv_std[i];
+            let xh_row = &self.cache_x_hat[i];
+
+            // g_j = γ_j * dy_j
+            let g: Vec<f32> = dy_row
+                .iter()
+                .zip(self.gamma.iter())
+                .map(|(dy, gam)| dy * gam)
+                .collect();
+
+            let sum_g: f32 = g.iter().sum();
+            let sum_g_xh: f32 = g.iter().zip(xh_row).map(|(gj, xhj)| gj * xhj).sum();
+
+            let dx_row: Vec<f32> = g
+                .iter()
+                .zip(xh_row.iter())
+                .map(|(gi, xhi)| inv_std / d * (d * gi - sum_g - xhi * sum_g_xh))
+                .collect();
+            dl_dx.push(dx_row);
+        }
+
+        dl_dx
+    }
+
+    pub fn apply_gradients(&mut self, lr: f32) {
+        for j in 0..self.gamma.len() {
+            self.gamma[j] -= lr * self.grad_gamma[j];
+            self.beta[j] -= lr * self.grad_beta[j];
+        }
+    }
+
+    pub fn grad_gamma_norm(&self) -> f32 {
+        self.grad_gamma
+            .iter()
+            .map(|v| v.powi(2))
+            .sum::<f32>()
+            .sqrt()
     }
 }

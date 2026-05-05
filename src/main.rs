@@ -33,10 +33,9 @@ use rand::RngExt;
 
 fn main() {
     let d_model = 8;
-    let d_ff = 32;
     let seq_len = 7;
 
-    let mut ffn = FeedForwardNetwork::new(d_model, d_ff);
+    let mut ln = LayerNormalization::new(d_model);
     let mut opt = AdamW::new(1e-2);
 
     // ダミーの hidden: (seq_len, d_model)
@@ -49,35 +48,48 @@ fn main() {
         })
         .collect();
 
-    let dl_dz2: Vec<Vec<f32>> = (0..seq_len)
-        .map(|_| {
-            (0..d_model)
-                .map(|_| rng.random_range(-1.0..1.0f32))
-                .collect()
-        })
-        .collect();
+    let target = vec![vec![0.0f32; d_model]; seq_len];
+    let n = (d_model * seq_len) as f32;
 
-    println!("=== FFN backward ===");
+    println!("=== LayerNorm backward ===");
     for step in 1..=20 {
-        let z2 = ffn.forward(&x);
+        let y = ln.forward(&x);
 
         // MSE loss の勾配
-        let n = (seq_len * d_model) as f32;
-        let dl_dz2: Vec<Vec<f32>> = z2.iter()
-            .map(|row| row.iter().map(|&zi| 2.0 * zi / n).collect())
+        let loss: f32 = y
+            .iter()
+            .zip(target.iter())
+            .flat_map(|(yr, tr)| yr.iter().zip(tr.iter()).map(|(&yi, &ti)| (yi - ti).powi(2)))
+            .sum::<f32>()
+            / n;
+        let dl_dy: Vec<Vec<f32>> = y
+            .iter()
+            .zip(target.iter())
+            .map(|(yr, tr)| {
+                yr.iter()
+                    .zip(tr.iter())
+                    .map(|(&yi, &ti)| 2.0 * (yi - ti) / n)
+                    .collect()
+            })
             .collect();
-    
-        let loss: f32 = z2.iter()
-            .flat_map(|r| r.iter())
-            .map(|v| v.powi(2))
-            .sum::<f32>() / n;
-    
-        let dl_dx = ffn.backward(&dl_dz2);
-        ffn.apply_gradients(&mut opt);
-    
+
+        let dl_dx = ln.backward(&dl_dy);
+        ln.apply_gradients(1e-2);
+
         if step % 5 == 0 {
-            println!("step {:2}  loss: {:.6}  grad_w1_norm: {:.4}",
-                step, loss, ffn.grad_w1_norm());
+            let dl_dx_norm = dl_dx
+                .iter()
+                .flat_map(|r| r.iter())
+                .map(|v| v.powi(2))
+                .sum::<f32>()
+                .sqrt();
+            println!(
+                "step {:2}  loss: {:.6}  grad_gamma_norm: {:.6}  dl_dx_norm: {:.6}",
+                step,
+                loss,
+                ln.grad_gamma_norm(),
+                dl_dx_norm
+            );
         }
     }
 }
