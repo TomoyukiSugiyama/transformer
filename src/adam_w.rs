@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 pub struct AdamWParam {
-    pub data: Vec<f32>, // パラメータ本体(W1, W2, b など)
+    data: Vec<f32>, // パラメータ本体(W1, W2, b など)
     m: Vec<f32>,        // 一次モーメント
     v: Vec<f32>,        // 二次モーメント
 }
@@ -50,12 +52,13 @@ impl AdamWParam {
 }
 
 pub struct AdamW {
-    pub lr: f32,
-    pub beta1: f32,
-    pub beta2: f32,
-    pub eps: f32,
-    pub wd: f32,
-    pub step_count: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    wd: f32,
+    step_count: usize,
+    moments: HashMap<String, AdamWParam>
 }
 
 impl AdamW {
@@ -67,6 +70,7 @@ impl AdamW {
             eps: 1e-8,
             wd: 0.01,
             step_count: 0,
+            moments: HashMap::new()
         }
     }
 
@@ -88,5 +92,21 @@ impl AdamW {
         self.step_count += 1;
         param.step(grad, self.step_count,
             self.lr, self.beta1, self.beta2, self.eps, self.wd);
+    }
+
+    pub fn step_matrix(&mut self,param_id: &str,w: &mut Vec<Vec<f32>>,grad: &[Vec<f32>]){
+        self.step_count += 1;
+
+        let flat_w:Vec<f32> = w.iter().flat_map(|row| row.iter().cloned()).collect();
+        let flat_g:Vec<f32> = grad.iter().flat_map(|row| row.iter().cloned()).collect();
+
+        let param = self.moments.entry(param_id.to_string()).or_insert_with(|| AdamWParam::new(flat_w));
+        param.step(&flat_g, self.step_count,
+            self.lr, self.beta1, self.beta2, self.eps, self.wd);
+
+        let cols = w[0].len();
+        for (row,chunk) in w.iter_mut().zip(param.data.chunks(cols)){
+            row.copy_from_slice(chunk);
+        }
     }
 }

@@ -1,8 +1,12 @@
 use rand::RngExt;
 use rand::rng;
 
+use crate::adam_w::AdamW;
+
 pub struct OutputHead {
-    pub w: Vec<Vec<f32>>,
+    w: Vec<Vec<f32>>,
+    grad_w: Vec<Vec<f32>>,
+    cache_hidden: Vec<Vec<f32>>,
     vocab_size: usize,
     d_model: usize,
 }
@@ -20,6 +24,8 @@ impl OutputHead {
             .collect();
         Self {
             w,
+            grad_w: vec![vec![0.0; vocab_size]; d_model],
+            cache_hidden: vec![],
             vocab_size,
             d_model,
         }
@@ -73,10 +79,42 @@ impl OutputHead {
         indexed[0].0
     }
 
-    pub fn forward(&self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    /// (seq_len, d_model) → (seq_len, vocab_size)
+    pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.cache_hidden = hidden.to_vec().clone();
         hidden
             .iter()
             .map(|row: &Vec<f32>| self.logits_last(row))
             .collect()
+    }
+
+    /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
+    /// grad_w を内部に保存する（apply_gradients で使用）
+    pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.grad_w = vec![vec![0.0; self.vocab_size]; self.d_model];
+
+        let seq_len = dl_dlogits.len();
+        let mut dl_dhidden = vec![vec![0.0f32; self.d_model]; seq_len];
+
+        for t in 0..seq_len {
+            // dL/dW += cache_hidden[t]^T ⊗ dl_dlogits[t]
+            for i in 0..self.d_model {
+                for j in 0..self.vocab_size {
+                    self.grad_w[i][j] += self.cache_hidden[t][i] * dl_dlogits[t][j];
+                }
+            }
+            // dL/d_hidden[t] = W × dl_dlogits[t]
+            for i in 0..self.d_model {
+                dl_dhidden[t][i] = (0..self.vocab_size)
+                    .map(|j| self.w[i][j] * dl_dlogits[t][j])
+                    .sum();
+            }
+        }
+
+        dl_dhidden
+    }
+
+    pub fn apply_gradients(&mut self, opt: &mut AdamW) {
+        opt.step_matrix("head.w", &mut self.w, &self.grad_w);
     }
 }

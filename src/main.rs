@@ -17,7 +17,7 @@ mod adam_w;
 mod cross_entropy_loss;
 
 use crate::{
-    adam_w::{AdamW, AdamWParam},
+    adam_w::AdamW,
     cross_entropy_loss::CrossEntropyLoss,
     embedding::Embedding,
     feed_forward_network::FeedForwardNetwork,
@@ -33,49 +33,49 @@ use rand::RngExt;
 
 fn main() {
     let vocab_size = 8;
-    let d_model = 8;
-    let lr = 1e-2;
+    let d_model    = 8;
+    let seq_len    = 7;  // make_lm_pair後の長さ
 
     let mut head = OutputHead::new(d_model, vocab_size);
-    let mut opt = AdamW::new(lr);
+    let mut opt  = AdamW::new(1e-2);
 
-    // AdamW の検証のため、head.w を public に変更し、直接更新する
-    let mut param = AdamWParam::from_matrix(&head.w);
+    // ダミーの hidden: (seq_len, d_model)
+    let mut rng = rand::rng();
+    let hidden: Vec<Vec<f32>> = (0..seq_len)
+        .map(|_| (0..d_model)
+            .map(|_| rng.random_range(-1.0..1.0f32))
+            .collect())
+        .collect();
+    let targets    = vec![4usize; seq_len];
+    let target_mask = vec![1u8; seq_len];
 
-    // ダミー
-    let hidden: Vec<f32> = (0..d_model).map(|i| i as f32).collect();
-    let target = 4usize;
+    println!("=== OutputHead backward（シーケンス対応版）===");
+    for step in 1..=20 {
+        // 1. Forward: (seq_len, d_model) → (seq_len, vocab_size)
+        let logits: Vec<Vec<f32>> = head.forward(&hidden);
 
-    println!("==== OutputHead + AdamW 学習 === ");
-    for step in 0..20 {
-        let logits = head.logits_last(&hidden);
-        let (loss, dl_dlogits) = CrossEntropyLoss::forward(&logits, target);
+        // 2. Loss
+        let (loss, dl_dlogits) = CrossEntropyLoss::forward_sequence(
+            &logits, &targets, &target_mask
+        );
 
-        // dL/d_logits: (vocab_size,)   = grad
-        // hidden:      (d_model,)
+        // 3. Backward: dL/dW を内部に保存
+        let _dl_dhidden = head.backward(&dl_dlogits);
 
-        // dL/dW = hidden^T × dL/d_logits
-        //       = (d_model, 1) × (1, vocab_size)
-        //       = (d_model, vocab_size)
-        let dw:Vec<f32> = hidden.iter().flat_map(|&h| dl_dlogits.iter().map(move |&g| h*g)).collect();
-
-        opt.step_one(&mut param, &dw);
-
-        head.w = param.to_matrix(d_model, vocab_size);
-        param = AdamWParam::from_matrix(&head.w);
+        // 4. パラメータ更新
+        head.apply_gradients(&mut opt);
 
         if step % 5 == 0 {
-            println!(
-                "step {:2} loss: {:.4} prob[target]: {:.4}",
-                step,
-                loss,
-                OutputHead::softmax(&logits)[target]
-            )
+            let avg_prob: f32 = logits.iter()
+                .map(|l| OutputHead::softmax(l)[4])
+                .sum::<f32>() / seq_len as f32;
+            println!("step {:2}  loss: {:.4}  avg_prob[target]: {:.4}",
+                step, loss, avg_prob);
         }
     }
 }
 
-fn make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
+fn _make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
     let ids = &enc.input_ids;
     let mask = &enc.attention_mask;
     let len = ids.len();
@@ -86,44 +86,6 @@ fn make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
     let target_mask = mask[1..].to_vec();
 
     (inputs, targets, target_mask)
-}
-
-fn _loss() {
-    let corpus = vec!["hello world rust transformer"];
-    let d_model = 8;
-    let d_ff = d_model * 4;
-    let n_heads = 2;
-    let n_layers = 2;
-    let seq_len = 8;
-
-    let tokenizer = Tokenizer::build(&corpus);
-    let vocab_size = tokenizer.vocab_size();
-    let embedding = Embedding::new(vocab_size, d_model);
-    let pe = SinusoidalPE::new(512, d_model);
-    let transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
-    let head = OutputHead::new(d_model, vocab_size);
-
-    let text = "hello world rust";
-    let enc = tokenizer.encode_with_padding(text, seq_len);
-
-    let (input_ids, targets, target_mask) = make_lm_pair(&enc);
-
-    let x = pe.forward(&embedding.forward(&input_ids));
-    let mask = causal_mask(seq_len);
-    let hidden = transformer.forward(&x, Some(&mask));
-    let logits = head.forward(&hidden);
-
-    let (loss, grad) = CrossEntropyLoss::forward_sequence(&logits, &targets, &target_mask);
-
-    println!("Loss {:.4}", loss);
-    let theorical = (tokenizer.vocab_size() as f32).ln();
-    println!("理論初期Loss: {:.4}", theorical);
-
-    println!("grad shape: ({}, {})", grad.len(), grad[0].len());
-    println!(
-        "grad[0] norm: {:.6}",
-        grad[0].iter().map(|v| v.powi(2)).sum::<f32>().sqrt()
-    );
 }
 
 fn _predict() {
