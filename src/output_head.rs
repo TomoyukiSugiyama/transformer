@@ -2,7 +2,7 @@ use rand::RngExt;
 use rand::rng;
 
 pub struct OutputHead {
-    w: Vec<Vec<f32>>,
+    pub w: Vec<Vec<f32>>,
     vocab_size: usize,
     d_model: usize,
 }
@@ -25,7 +25,7 @@ impl OutputHead {
         }
     }
 
-    pub fn logit_last(&self, last_hidden: &[f32]) -> Vec<f32> {
+    pub fn logits_last(&self, last_hidden: &[f32]) -> Vec<f32> {
         (0..self.vocab_size)
             .map(|j| {
                 last_hidden
@@ -76,7 +76,7 @@ impl OutputHead {
     pub fn forward(&self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
         hidden
             .iter()
-            .map(|row: &Vec<f32>| self.logit_last(row))
+            .map(|row: &Vec<f32>| self.logits_last(row))
             .collect()
     }
 }

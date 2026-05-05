@@ -13,46 +13,66 @@ mod transformer_block;
 
 mod output_head;
 
+mod adam_w;
 mod cross_entropy_loss;
 
 use crate::{
-    cross_entropy_loss::CrossEntropyLoss, embedding::Embedding, feed_forward_network::FeedForwardNetwork, layer_normalization::LayerNormalization, multi_head_attention::{MultiHeadAttention, causal_mask}, output_head::OutputHead, sinusoidal_pe::SinusoidalPE, tokenizer::*, transformer::Transformer
+    adam_w::{AdamW, AdamWParam},
+    cross_entropy_loss::CrossEntropyLoss,
+    embedding::Embedding,
+    feed_forward_network::FeedForwardNetwork,
+    layer_normalization::LayerNormalization,
+    multi_head_attention::{MultiHeadAttention, causal_mask},
+    output_head::OutputHead,
+    sinusoidal_pe::SinusoidalPE,
+    tokenizer::*,
+    transformer::Transformer,
 };
 
+use rand::RngExt;
+
 fn main() {
-    let corpus = vec!["hello world rust transformer"];
+    let vocab_size = 8;
     let d_model = 8;
-    let d_ff = d_model * 4;
-    let n_heads = 2;
-    let n_layers = 2;
-    let seq_len = 8;
-    
-    let tokenizer = Tokenizer::build(&corpus);
-    let vocab_size = tokenizer.vocab_size();
-    let embedding = Embedding::new(vocab_size, d_model);
-    let pe = SinusoidalPE::new(512, d_model);
-    let transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
-    let head = OutputHead::new(d_model, vocab_size);
+    let lr = 1e-2;
 
-    let text = "hello world rust";
-    let enc =tokenizer.encode_with_padding(text, seq_len);
+    let mut head = OutputHead::new(d_model, vocab_size);
+    let mut opt = AdamW::new(lr);
 
-    let (input_ids,targets,target_mask) = make_lm_pair(&enc);
+    // AdamW の検証のため、head.w を public に変更し、直接更新する
+    let mut param = AdamWParam::from_matrix(&head.w);
 
-    let x = pe.forward(&embedding.forward(&input_ids));
-    let mask = causal_mask(seq_len);
-    let hidden = transformer.forward(&x, Some(&mask));
-    let logits = head.forward(&hidden);
+    // ダミー
+    let hidden: Vec<f32> = (0..d_model).map(|i| i as f32).collect();
+    let target = 4usize;
 
-    let (loss,grad) = CrossEntropyLoss::forward_sequence(&logits, &targets, &target_mask);
+    println!("==== OutputHead + AdamW 学習 === ");
+    for step in 0..20 {
+        let logits = head.logits_last(&hidden);
+        let (loss, dl_dlogits) = CrossEntropyLoss::forward(&logits, target);
 
-    println!("Loss {:.4}",loss);
-    let theorical = (tokenizer.vocab_size() as f32).ln();
-    println!("理論初期Loss: {:.4}",theorical);
+        // dL/d_logits: (vocab_size,)   = grad
+        // hidden:      (d_model,)
 
-    println!("grad shape: ({}, {})",grad.len(),grad[0].len());
-    println!("grad[0] norm: {:.6}",grad[0].iter().map(|v| v.powi(2)).sum::<f32>().sqrt());
+        // dL/dW = hidden^T × dL/d_logits
+        //       = (d_model, 1) × (1, vocab_size)
+        //       = (d_model, vocab_size)
+        let dw:Vec<f32> = hidden.iter().flat_map(|&h| dl_dlogits.iter().map(move |&g| h*g)).collect();
 
+        opt.step_one(&mut param, &dw);
+
+        head.w = param.to_matrix(d_model, vocab_size);
+        param = AdamWParam::from_matrix(&head.w);
+
+        if step % 5 == 0 {
+            println!(
+                "step {:2} loss: {:.4} prob[target]: {:.4}",
+                step,
+                loss,
+                OutputHead::softmax(&logits)[target]
+            )
+        }
+    }
 }
 
 fn make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
@@ -68,7 +88,45 @@ fn make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
     (inputs, targets, target_mask)
 }
 
-fn _predict(){
+fn _loss() {
+    let corpus = vec!["hello world rust transformer"];
+    let d_model = 8;
+    let d_ff = d_model * 4;
+    let n_heads = 2;
+    let n_layers = 2;
+    let seq_len = 8;
+
+    let tokenizer = Tokenizer::build(&corpus);
+    let vocab_size = tokenizer.vocab_size();
+    let embedding = Embedding::new(vocab_size, d_model);
+    let pe = SinusoidalPE::new(512, d_model);
+    let transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
+    let head = OutputHead::new(d_model, vocab_size);
+
+    let text = "hello world rust";
+    let enc = tokenizer.encode_with_padding(text, seq_len);
+
+    let (input_ids, targets, target_mask) = make_lm_pair(&enc);
+
+    let x = pe.forward(&embedding.forward(&input_ids));
+    let mask = causal_mask(seq_len);
+    let hidden = transformer.forward(&x, Some(&mask));
+    let logits = head.forward(&hidden);
+
+    let (loss, grad) = CrossEntropyLoss::forward_sequence(&logits, &targets, &target_mask);
+
+    println!("Loss {:.4}", loss);
+    let theorical = (tokenizer.vocab_size() as f32).ln();
+    println!("理論初期Loss: {:.4}", theorical);
+
+    println!("grad shape: ({}, {})", grad.len(), grad[0].len());
+    println!(
+        "grad[0] norm: {:.6}",
+        grad[0].iter().map(|v| v.powi(2)).sum::<f32>().sqrt()
+    );
+}
+
+fn _predict() {
     let d_model = 8;
     let d_ff = d_model * 4;
     let n_heads = 2;
@@ -133,7 +191,7 @@ fn _predict(){
         .iter()
         .rposition(|&m| m == 1)
         .unwrap_or(0);
-    let logits = heads.logit_last(&hidden[last_real_pos]);
+    let logits = heads.logits_last(&hidden[last_real_pos]);
     let probs = OutputHead::softmax(&logits);
 
     let next_id = OutputHead::greedy(&probs);
@@ -159,7 +217,7 @@ fn _predict(){
         let hidden = transformer.forward(&x, Some(&causal_mask(seq_len)));
 
         let last_pos = generated_ids.len().min(seq_len) - 1;
-        let logits = heads.logit_last(&hidden[last_pos]);
+        let logits = heads.logits_last(&hidden[last_pos]);
         let next_id = OutputHead::top_k_sample(&logits, 5, 0.8);
         let next_token = tokenizer.id_to_token_str(next_id).unwrap_or("<UNK>");
         println!(" step[{step}]: next={next_token} (id={next_id})");
