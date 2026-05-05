@@ -33,9 +33,10 @@ use rand::RngExt;
 
 fn main() {
     let d_model = 8;
+    let n_heads = 2;
     let seq_len = 7;
 
-    let mut ln = LayerNormalization::new(d_model);
+    let mut mha = MultiHeadAttention::new(d_model,n_heads);
     let mut opt = AdamW::new(1e-2);
 
     // ダミーの hidden: (seq_len, d_model)
@@ -51,18 +52,18 @@ fn main() {
     let target = vec![vec![0.0f32; d_model]; seq_len];
     let n = (d_model * seq_len) as f32;
 
-    println!("=== LayerNorm backward ===");
+    println!("=== MHA backward ===");
     for step in 1..=20 {
-        let y = ln.forward(&x);
+        let (out,_) = mha.forward(&x,None);
 
         // MSE loss の勾配
-        let loss: f32 = y
+        let loss: f32 = out
             .iter()
             .zip(target.iter())
             .flat_map(|(yr, tr)| yr.iter().zip(tr.iter()).map(|(&yi, &ti)| (yi - ti).powi(2)))
             .sum::<f32>()
             / n;
-        let dl_dy: Vec<Vec<f32>> = y
+        let dl_dout: Vec<Vec<f32>> = out
             .iter()
             .zip(target.iter())
             .map(|(yr, tr)| {
@@ -73,23 +74,11 @@ fn main() {
             })
             .collect();
 
-        let dl_dx = ln.backward(&dl_dy);
-        ln.apply_gradients(1e-2);
+        mha.backward(&dl_dout);
+        mha.apply_gradients(1e-3);
 
         if step % 5 == 0 {
-            let dl_dx_norm = dl_dx
-                .iter()
-                .flat_map(|r| r.iter())
-                .map(|v| v.powi(2))
-                .sum::<f32>()
-                .sqrt();
-            println!(
-                "step {:2}  loss: {:.6}  grad_gamma_norm: {:.6}  dl_dx_norm: {:.6}",
-                step,
-                loss,
-                ln.grad_gamma_norm(),
-                dl_dx_norm
-            );
+            println!("step {:2}  loss: {:.6}", step, loss);
         }
     }
 }
