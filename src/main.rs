@@ -16,6 +16,8 @@ mod output_head;
 mod adam_w;
 mod cross_entropy_loss;
 
+use std::vec;
+
 use crate::{
     adam_w::AdamW,
     cross_entropy_loss::CrossEntropyLoss,
@@ -32,38 +34,33 @@ use crate::{
 use rand::RngExt;
 
 fn main() {
+    let vocab_size = 16;
     let d_model = 8;
-    let n_heads = 2;
     let seq_len = 7;
+    let pad_id = 0usize;
 
-    let mut mha = MultiHeadAttention::new(d_model,n_heads);
+    let mut emb = Embedding::new(vocab_size, d_model, Some(pad_id));
     let mut opt = AdamW::new(1e-2);
 
-    // ダミーの hidden: (seq_len, d_model)
+    // ダミー
     let mut rng = rand::rng();
-    let x: Vec<Vec<f32>> = (0..seq_len)
-        .map(|_| {
-            (0..d_model)
-                .map(|_| rng.random_range(-1.0..1.0f32))
-                .collect()
-        })
-        .collect();
 
+    let token_ids: Vec<usize> = vec![0, 3, 1, 5, 0, 2, 4];
     let target = vec![vec![0.0f32; d_model]; seq_len];
     let n = (d_model * seq_len) as f32;
 
-    println!("=== MHA backward ===");
+    println!("=== Embedding backward ===");
     for step in 1..=20 {
-        let (out,_) = mha.forward(&x,None);
+        let x = emb.forward(&token_ids);
 
         // MSE loss の勾配
-        let loss: f32 = out
+        let loss: f32 = x
             .iter()
             .zip(target.iter())
             .flat_map(|(yr, tr)| yr.iter().zip(tr.iter()).map(|(&yi, &ti)| (yi - ti).powi(2)))
             .sum::<f32>()
             / n;
-        let dl_dout: Vec<Vec<f32>> = out
+        let dl_dx: Vec<Vec<f32>> = x
             .iter()
             .zip(target.iter())
             .map(|(yr, tr)| {
@@ -74,11 +71,16 @@ fn main() {
             })
             .collect();
 
-        mha.backward(&dl_dout);
-        mha.apply_gradients(1e-3);
+        emb.backward(&dl_dx);
+        emb.apply_gradients(1e-3);
 
         if step % 5 == 0 {
-            println!("step {:2}  loss: {:.6}", step, loss);
+            println!(
+                "step {:2}  loss: {:.6}  pad_weight_norm: {:.6}",
+                step,
+                loss,
+                emb.weight_norm(pad_id)
+            );
         }
     }
 }
