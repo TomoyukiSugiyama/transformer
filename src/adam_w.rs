@@ -126,4 +126,10 @@ impl AdamW {
             row.copy_from_slice(chunk);
         }
     }
+
+    pub fn step_vector(&mut self, key: &str, param: &mut Vec<f32>, grad: &[f32]) {
+        let mut param_mat = vec![param.clone()];
+        self.step_matrix(key, &mut param_mat, &[grad.to_vec()]);
+        *param = param_mat.remove(0);
+    }
 }

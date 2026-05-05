@@ -168,16 +168,24 @@ impl FeedForwardNetwork {
         dl_dx
     }
 
-    pub fn apply_gradients(&mut self, opt: &mut AdamW) {
-        opt.step_matrix("ffn.w1", &mut self.w1, &self.grad_w1);
-        opt.step_matrix("ffn.w2", &mut self.w2, &self.grad_w2);
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        opt.step_matrix(&format!("{prefix}.w1"), &mut self.w1, &self.grad_w1);
+        opt.step_matrix(&format!("{prefix}.w2"), &mut self.w2, &self.grad_w2);
 
         let mut b1_mat = vec![self.b1.clone()];
-        opt.step_matrix("ffn.b1", &mut b1_mat, &[self.grad_b1.clone()]);
+        opt.step_matrix(
+            &format!("{prefix}.b1"),
+            &mut b1_mat,
+            &[self.grad_b1.clone()],
+        );
         self.b1 = b1_mat.remove(0);
 
         let mut b2_mat = vec![self.b2.clone()];
-        opt.step_matrix("ffn.b2", &mut b2_mat, &[self.grad_b2.clone()]);
+        opt.step_matrix(
+            &format!("{prefix}.b2"),
+            &mut b2_mat,
+            &[self.grad_b2.clone()],
+        );
         self.b2 = b2_mat.remove(0);
     }
 

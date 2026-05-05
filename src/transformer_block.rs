@@ -1,6 +1,7 @@
 use crate::FeedForwardNetwork;
 use crate::LayerNormalization;
 use crate::MultiHeadAttention;
+use crate::adam_w::AdamW;
 
 /// Attention → Add&Norm → FFN → Add&Norm
 pub struct TransformerBlock {
@@ -8,6 +9,8 @@ pub struct TransformerBlock {
     norm1: LayerNormalization,
     ffn: FeedForwardNetwork,
     norm2: LayerNormalization,
+    cache_x: Vec<Vec<f32>>,
+    cache_x2: Vec<Vec<f32>>,
 }
 
 impl TransformerBlock {
@@ -17,20 +20,54 @@ impl TransformerBlock {
             norm1: LayerNormalization::new(d_model),
             ffn: FeedForwardNetwork::new(d_model, d_ff),
             norm2: LayerNormalization::new(d_model),
+            cache_x: Vec::new(),
+            cache_x2: Vec::new(),
         }
     }
 
-    /// Pre-LN方式
+    /// Pre-LN: Norm → Sublayer → Residual
     pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
+        self.cache_x = x.to_vec();
         let norm1 = self.norm1.forward(x);
         let (attn_out, _) = self.mha.forward(&norm1, mask);
-        let x = residual_add(x, &attn_out);
+        let x2 = residual_add(x, &attn_out);
 
-        let norm2 = self.norm2.forward(&x);
+        self.cache_x2 = x2.clone();
+        let norm2 = self.norm2.forward(&x2);
         let ffn_out = self.ffn.forward(&norm2);
-        let x = residual_add(&x, &ffn_out);
+        let out = residual_add(&x2, &ffn_out);
 
-        x
+        out
+    }
+
+    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        // FFN
+        // out = x2 + ffn(norm2(x2))
+        // dl_dout は x2 と ffn_out の両方に流れる（residual）
+        let dl_dffn_dout = dl_dout;
+        let dl_dx2_from_res = dl_dout.to_vec();
+
+        let dl_dnorm2 = self.ffn.backward(dl_dffn_dout);
+        let dl_dx2_from_ffn = self.norm2.backward(&dl_dnorm2);
+
+        let dl_dx2 = residual_add(&dl_dx2_from_res, &dl_dx2_from_ffn);
+
+        // MHA
+        // x2 = x + mha(norm1(x))
+        let dl_dattn_out = &dl_dx2;
+        let dl_dx_from_res = dl_dx2.clone();
+
+        let dl_dnorm1 = self.mha.backward(&dl_dattn_out);
+        let dl_dx_from_mha = self.norm1.backward(&dl_dnorm1);
+
+        residual_add(&dl_dx_from_res, &dl_dx_from_mha)
+    }
+
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        self.mha.apply_gradients(opt, &format!("{prefix}.mha"));
+        self.norm1.apply_gradients(opt, &format!("{prefix}.norm1"));
+        self.ffn.apply_gradients(opt, &format!("{prefix}.ffn"));
+        self.norm2.apply_gradients(opt, &format!("{prefix}.norm2"));
     }
 }
 

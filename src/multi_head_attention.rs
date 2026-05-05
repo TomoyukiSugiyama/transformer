@@ -1,8 +1,7 @@
-use std::mem::zeroed;
-
 use rand::RngExt;
 use rand::rng;
 
+use crate::adam_w::AdamW;
 use crate::utility::linear;
 
 pub struct MultiHeadAttention {
@@ -190,19 +189,27 @@ impl MultiHeadAttention {
             .collect()
     }
 
-    pub fn apply_gradients(&mut self, lr:f32){
-        let apply = |w:&mut Vec<Vec<f32>>,g: &mut Vec<Vec<f32>>| {
-            for i in 0..w.len() {
-                for j in 0..w[i].len() {
-                    w[i][j] -= g[i][j]
-                }
-            }
-        };
-
-        apply(&mut self.w_q,&mut self.grad_w_q.clone());
-        apply(&mut self.w_k,&mut self.grad_w_k.clone());
-        apply(&mut self.w_v,&mut self.grad_w_v.clone());
-        apply(&mut self.w_o,&mut self.grad_w_o.clone());
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        opt.step_matrix(
+            &format!("{prefix}.w_q"),
+            &mut self.w_q,
+            &self.grad_w_q.clone(),
+        );
+        opt.step_matrix(
+            &format!("{prefix}.w_k"),
+            &mut self.w_k,
+            &self.grad_w_k.clone(),
+        );
+        opt.step_matrix(
+            &format!("{prefix}.w_v"),
+            &mut self.w_v,
+            &self.grad_w_v.clone(),
+        );
+        opt.step_matrix(
+            &format!("{prefix}.w_o"),
+            &mut self.w_o,
+            &self.grad_w_o.clone(),
+        );
     }
 }
 

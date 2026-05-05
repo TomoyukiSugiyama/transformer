@@ -1,6 +1,8 @@
 use rand::RngExt;
 use rand::rng;
 
+use crate::adam_w::AdamW;
+
 pub struct Embedding {
     weight: Vec<Vec<f32>>,      // [vocab_size, d_model]
     grad_weight: Vec<Vec<f32>>, // [vocab_size, d_model]
@@ -68,7 +70,7 @@ impl Embedding {
         }
     }
 
-    pub fn apply_gradients(&mut self, lr: f32) {
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
         for id in 0..self.vocab_size {
             if let Some(pad) = self.pad_id {
                 if id == pad {
@@ -76,9 +78,11 @@ impl Embedding {
                 }
             }
 
-            for j in 0..self.d_model {
-                self.weight[id][j] -= lr * self.grad_weight[id][j];
-            }
+            opt.step_vector(
+                &format!("{prefix}.{id}"),
+                &mut self.weight[id],
+                &self.grad_weight[id],
+            );
         }
     }
 

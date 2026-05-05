@@ -114,7 +114,7 @@ impl OutputHead {
         dl_dhidden
     }
 
-    pub fn apply_gradients(&mut self, opt: &mut AdamW) {
-        opt.step_matrix("head.w", &mut self.w, &self.grad_w);
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        opt.step_matrix(&format!("{prefix}.w"), &mut self.w, &self.grad_w);
     }
 }

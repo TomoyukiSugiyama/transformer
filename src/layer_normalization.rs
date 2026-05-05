@@ -1,3 +1,5 @@
+use crate::adam_w::AdamW;
+
 pub struct LayerNormalization {
     gamma: Vec<f32>,
     beta: Vec<f32>,
@@ -90,11 +92,13 @@ impl LayerNormalization {
         dl_dx
     }
 
-    pub fn apply_gradients(&mut self, lr: f32) {
-        for j in 0..self.gamma.len() {
-            self.gamma[j] -= lr * self.grad_gamma[j];
-            self.beta[j] -= lr * self.grad_beta[j];
-        }
+    pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        opt.step_vector(
+            &format!("{prefix}.gamma"),
+            &mut self.gamma,
+            &self.grad_gamma,
+        );
+        opt.step_vector(&format!("{prefix}.beta"), &mut self.beta, &self.grad_beta);
     }
 
     pub fn grad_gamma_norm(&self) -> f32 {

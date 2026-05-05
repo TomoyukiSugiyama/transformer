@@ -34,33 +34,39 @@ use crate::{
 use rand::RngExt;
 
 fn main() {
-    let vocab_size = 16;
     let d_model = 8;
+    let n_heads = 2;
+    let d_ff = 32;
+    let n_layers = 2;
     let seq_len = 7;
-    let pad_id = 0usize;
 
-    let mut emb = Embedding::new(vocab_size, d_model, Some(pad_id));
-    let mut opt = AdamW::new(1e-2);
+    let mut transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
+    let mut opt = AdamW::new(1e-3);
 
     // ダミー
     let mut rng = rand::rng();
-
-    let token_ids: Vec<usize> = vec![0, 3, 1, 5, 0, 2, 4];
-    let target = vec![vec![0.0f32; d_model]; seq_len];
+    let x: Vec<Vec<f32>> = (0..seq_len)
+        .map(|_| {
+            (0..d_model)
+                .map(|_| rng.random_range(-1.0..1.0f32))
+                .collect()
+        })
+        .collect();
+    let target: Vec<Vec<f32>> = vec![vec![0.0f32; d_model]; seq_len];
     let n = (d_model * seq_len) as f32;
 
-    println!("=== Embedding backward ===");
-    for step in 1..=20 {
-        let x = emb.forward(&token_ids);
+    println!("=== Transcormer backward ===");
+    for step in 1..=50 {
+        let out = transformer.forward(&x, None);
 
         // MSE loss の勾配
-        let loss: f32 = x
+        let loss: f32 = out
             .iter()
             .zip(target.iter())
             .flat_map(|(yr, tr)| yr.iter().zip(tr.iter()).map(|(&yi, &ti)| (yi - ti).powi(2)))
             .sum::<f32>()
             / n;
-        let dl_dx: Vec<Vec<f32>> = x
+        let dl_dout: Vec<Vec<f32>> = out
             .iter()
             .zip(target.iter())
             .map(|(yr, tr)| {
@@ -71,29 +77,12 @@ fn main() {
             })
             .collect();
 
-        emb.backward(&dl_dx);
-        emb.apply_gradients(1e-3);
+        transformer.backward(&dl_dout);
+        transformer.apply_gradients(&mut opt, "transformer");
 
         if step % 5 == 0 {
-            println!(
-                "step {:2}  loss: {:.6}  pad_weight_norm: {:.6}",
-                step,
-                loss,
-                emb.weight_norm(pad_id)
-            );
+            println!("step {:2}  loss: {:.6}", step, loss);
         }
     }
 }
 
-fn _make_lm_pair(enc: &Encoding) -> (Vec<usize>, Vec<usize>, Vec<u8>) {
-    let ids = &enc.input_ids;
-    let mask = &enc.attention_mask;
-    let len = ids.len();
-
-    let inputs = ids[..len - 1].to_vec();
-    let targets = ids[1..].to_vec();
-
-    let target_mask = mask[1..].to_vec();
-
-    (inputs, targets, target_mask)
-}
