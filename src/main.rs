@@ -16,73 +16,53 @@ mod output_head;
 mod adam_w;
 mod cross_entropy_loss;
 
+mod language_model;
+
 use std::vec;
 
 use crate::{
-    adam_w::AdamW,
-    cross_entropy_loss::CrossEntropyLoss,
-    embedding::Embedding,
-    feed_forward_network::FeedForwardNetwork,
-    layer_normalization::LayerNormalization,
-    multi_head_attention::{MultiHeadAttention, causal_mask},
-    output_head::OutputHead,
-    sinusoidal_pe::SinusoidalPE,
-    tokenizer::*,
-    transformer::Transformer,
+    adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
+    layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
 };
 
-use rand::RngExt;
-
 fn main() {
-    let d_model = 8;
+    let vocab_size = 14; // 予約4 + 通常10
+    let d_model = 32;
     let n_heads = 2;
-    let d_ff = 32;
+    let d_ff = 64;
     let n_layers = 2;
-    let seq_len = 7;
+    let pad_id = 0usize;
 
-    let mut transformer = Transformer::new(n_layers, d_model, n_heads, d_ff);
-    let mut opt = AdamW::new(1e-3);
+    let mut model = LanguageModel::new(vocab_size, d_model, n_heads, d_ff, n_layers, Some(pad_id));
+    let mut opt = AdamW::new(1e-4);
 
-    // ダミー
-    let mut rng = rand::rng();
-    let x: Vec<Vec<f32>> = (0..seq_len)
-        .map(|_| {
-            (0..d_model)
-                .map(|_| rng.random_range(-1.0..1.0f32))
-                .collect()
-        })
-        .collect();
-    let target: Vec<Vec<f32>> = vec![vec![0.0f32; d_model]; seq_len];
-    let n = (d_model * seq_len) as f32;
+    let token_ids: Vec<usize> = vec![4, 5, 6, 7, 4, 5, 6, 7, 4, 5];
 
-    println!("=== Transcormer backward ===");
-    for step in 1..=50 {
-        let out = transformer.forward(&x, None);
-
-        // MSE loss の勾配
-        let loss: f32 = out
-            .iter()
-            .zip(target.iter())
-            .flat_map(|(yr, tr)| yr.iter().zip(tr.iter()).map(|(&yi, &ti)| (yi - ti).powi(2)))
-            .sum::<f32>()
-            / n;
-        let dl_dout: Vec<Vec<f32>> = out
-            .iter()
-            .zip(target.iter())
-            .map(|(yr, tr)| {
-                yr.iter()
-                    .zip(tr.iter())
-                    .map(|(&yi, &ti)| 2.0 * (yi - ti) / n)
-                    .collect()
-            })
-            .collect();
-
-        transformer.backward(&dl_dout);
-        transformer.apply_gradients(&mut opt, "transformer");
-
-        if step % 5 == 0 {
-            println!("step {:2}  loss: {:.6}", step, loss);
+    println!("=== LanguageModel 学習 ===");
+    for step in 1..=200 {
+        let loss = model.train_step(&token_ids, &mut opt, pad_id);
+        if step == 1 {
+            println!("step   1  loss: {:.6}", loss); // ← 追加
+        }
+        if step % 20 == 0 {
+            println!("step {:3} loss {:.6}", step, loss);
         }
     }
-}
 
+    println!("=== 推論 (greedy) ===");
+    let prompt = vec![4usize, 5, 6];
+    let generated = model.generate(&prompt, 7);
+    println!("prompt:    {:?}", prompt);
+    println!("generated: {:?}", generated);
+    println!("expected:  [7, 4, 5, 6, 7, 4, 5]");
+    println!("=== 推論 (top-k, k=3, temp=0.8) ===");
+    let generated = model.generate_top_k(&prompt, 7, 3, 0.8);
+    println!("generated: {:?}", generated);
+
+    println!("=== 推論 (別 prompt) ===");
+    let prompt2 = vec![7usize];
+    let generated2 = model.generate(&prompt2, 5);
+    println!("prompt:    {:?}", prompt2);
+    println!("generated: {:?}", generated2);
+    println!("expected:  [4, 5, 6, 7, 4]");
+}
