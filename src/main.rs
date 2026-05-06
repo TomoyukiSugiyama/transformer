@@ -46,6 +46,7 @@ fn main() {
         println!("train text: {:?} ids: {:?}", text, ids)
     }
     println!("=== 学習 ===");
+    let save_every = 50;
     let end_step = 100;
     for step in 1..=end_step {
         let mut total_loss = 0.0f32;
@@ -54,7 +55,15 @@ fn main() {
             total_loss += model.train_step(&ids, &mut opt, 0usize);
         }
 
-        if step % 50 == 0 {
+        if step % save_every == 0 {
+            let path = format!("checkpoints/step_{step:06}.bin");
+            model
+                .save_training_checkpoint(&path, &opt, end_step)
+                .unwrap();
+            model
+                .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
+                .unwrap();
+            println!("saved: {path}");
             println!(
                 "step {:3}  loss: {:.6}",
                 step,
@@ -65,10 +74,6 @@ fn main() {
 
     model
         .save_inference_checkpoint("checkpoints/inference.bin")
-        .unwrap();
-
-    model
-        .save_training_checkpoint("checkpoints/training.bin", &opt, end_step)
         .unwrap();
 
     println!("\n=== 推論 (greedy) ===");
@@ -88,7 +93,7 @@ fn main() {
 
     println!("=== チェックポイントから再学習 ===");
     let (mut l_model, mut l_opt, l_end_step) =
-        LanguageModel::load_training_checkpoint("checkpoints/training.bin").unwrap();
+        LanguageModel::load_training_checkpoint("checkpoints/latest.bin").unwrap();
     assert!(end_step == l_end_step);
     let start_step = l_end_step + 1;
 
@@ -99,7 +104,15 @@ fn main() {
             total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
         }
 
-        if step % 50 == 0 {
+        if step % save_every == 0 {
+            let path = format!("checkpoints/step_{step:06}.bin");
+            model
+                .save_training_checkpoint(&path, &opt, end_step)
+                .unwrap();
+            model
+                .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
+                .unwrap();
+            println!("saved: {path}");
             println!(
                 "step {:3}  loss: {:.6}",
                 step,
