@@ -157,6 +157,41 @@ impl LanguageModel {
         map.merge("output_head", self.output_head.to_weight_map());
         map.save(path)
     }
+
+    pub fn load_interface_checlppoint(path: &str) -> Result<Self> {
+        let map = WeightMap::load(path)?;
+        let d_model = map.get_scalar("meta.d_model")? as usize;
+        let n_heads = map.get_scalar("meta.n_heads")? as usize;
+        let d_ff = map.get_scalar("meta.d_ff")? as usize;
+        let n_layers = map.get_scalar("meta.n_layers")? as usize;
+        let max_len = map.get_scalar("meta.max_len")? as usize;
+        let mut tokenizer = Tokenizer::build(&[""]);
+        tokenizer.from_weight_map(&map.scoped("tokenizer"))?;
+        let vocab_size = tokenizer.vocab_size();
+
+        let mut model = Self {
+            tokenizer,
+            embedding: Embedding::new(vocab_size, d_model, Some(0)),
+            pe: SinusoidalPE::new(max_len, d_model),
+            transformer: Transformer::new(n_layers, d_model, n_heads, d_ff),
+            output_head: OutputHead::new(d_model, vocab_size),
+            d_model,
+            n_heads,
+            d_ff,
+            n_layers,
+            max_len,
+        };
+
+        model.embedding.from_weight_map(&map.scoped("embedding"))?;
+        model
+            .transformer
+            .from_weight_map(&map.scoped("transformer"))?;
+        model
+            .output_head
+            .from_weight_map(&map.scoped("output_head"))?;
+
+        Ok(model)
+    }
 }
 
 fn pad_grad(mut dl: Vec<Vec<f32>>, seq: usize) -> Vec<Vec<f32>> {

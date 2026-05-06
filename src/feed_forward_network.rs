@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use rand::RngExt;
 use rand::rng;
 
@@ -196,11 +200,27 @@ impl Checkpointable for FeedForwardNetwork {
     fn to_weight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
         map.insert_scalar("d_model", self.d_model as u64);
-        map.insert_scalar("d_ff", self.d_model as u64);
+        map.insert_scalar("d_ff", self.d_ff as u64);
         map.insert_matrix("w1", self.w1.clone());
         map.insert_vector("b1", self.b1.clone());
         map.insert_matrix("w2", self.w2.clone());
         map.insert_vector("b2", self.b2.clone());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let d_model = map.get_scalar("d_model")? as usize;
+        let d_ff = map.get_scalar("d_ff")? as usize;
+        if d_model != self.d_model || d_ff != self.d_ff {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Feed forward network config mismatch",
+            ));
+        }
+        self.w1 = map.get_matrix("w1")?.clone();
+        self.b1 = map.get_vector("b1")?.clone();
+        self.w2 = map.get_matrix("w2")?.clone();
+        self.b2 = map.get_vector("b2")?.clone();
+        Ok(())
     }
 }

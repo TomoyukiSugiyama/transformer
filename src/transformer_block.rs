@@ -89,4 +89,12 @@ impl Checkpointable for TransformerBlock {
         map.merge("norm2", self.norm2.to_weight_map());
         map
     }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> std::io::Result<()> {
+        self.mha.from_weight_map(&map.scoped("mha"))?;
+        self.norm1.from_weight_map(&map.scoped("norm1"))?;
+        self.ffn.from_weight_map(&map.scoped("ffn"))?;
+        self.norm2.from_weight_map(&map.scoped("norm2"))?;
+        Ok(())
+    }
 }

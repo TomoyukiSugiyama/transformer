@@ -46,7 +46,7 @@ fn main() {
         println!("train text: {:?} ids: {:?}", text, ids)
     }
     println!("=== 学習 ===");
-    for step in 1..=10 {
+    for step in 1..=100 {
         let mut total_loss = 0.0f32;
         for text in corpus {
             let ids = model.tokenizer.encode_simple(text);
@@ -76,4 +76,8 @@ fn main() {
         "generated: \"{}\"",
         model.generate_top_k(prompt, 10, 3, 0.8)
     );
+
+    println!("\n=== 推論 (loaded) ===");
+    let mut loaded = LanguageModel::load_interface_checlppoint("checkpoints/model.bin").unwrap();
+    println!("generated: \"{}\"", loaded.generate(prompt, 10));
 }

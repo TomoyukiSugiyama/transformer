@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use rand::RngExt;
 use rand::rng;
 
@@ -128,5 +132,18 @@ impl Checkpointable for OutputHead {
         map.insert_scalar("d_model", self.d_model as u64);
         map.insert_matrix("w", self.w.clone());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let vocab_size = map.get_scalar("vocab_size")? as usize;
+        let d_model = map.get_scalar("d_model")? as usize;
+        if vocab_size != self.vocab_size || d_model != self.d_model {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Output head config mismatch",
+            ));
+        }
+        self.w = map.get_matrix("w")?.clone();
+        Ok(())
     }
 }

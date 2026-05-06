@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use rand::RngExt;
 use rand::rng;
 
@@ -95,8 +99,28 @@ impl Checkpointable for Embedding {
         map.insert_scalar("vocab_size", self.vocab_size as u64);
         map.insert_scalar("d_model", self.d_model as u64);
         map.insert_scalar("has_pad_id", self.pad_id.is_some() as u64);
-        map.insert_scalar("has_pad", self.pad_id.unwrap_or(0) as u64);
+        map.insert_scalar("pad_id", self.pad_id.unwrap_or(0) as u64);
         map.insert_matrix("weight", self.weight.clone());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let vocab_size = map.get_scalar("vocab_size")? as usize;
+        let d_model = map.get_scalar("d_model")? as usize;
+        let has_pad_id = map.get_scalar("has_pad_id")? == 1;
+        let pad_id = if has_pad_id {
+            Some(map.get_scalar("pad_id")? as usize)
+        } else {
+            None
+        };
+        if vocab_size != self.vocab_size || d_model != self.d_model || pad_id != self.pad_id {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "embedding config mismatch",
+            ));
+        }
+        self.weight = map.get_matrix("weight")?.clone();
+
+        Ok(())
     }
 }

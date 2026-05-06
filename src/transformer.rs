@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use crate::{
     adam_w::AdamW,
     checkpoint::{Checkpointable, WeightMap},
@@ -55,5 +59,20 @@ impl Checkpointable for Transformer {
         }
         map.merge("final_norm", self.final_norm.to_weight_map());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let n_layers = map.get_scalar("n_layers")? as usize;
+        if n_layers != self.blocks.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "transformer n_layer mismatch",
+            ));
+        }
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            block.from_weight_map(&map.scoped(&format!("blocks.{i}")))?;
+        }
+        self.final_norm.from_weight_map(&map.scoped("final_norm"))?;
+        Ok(())
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Result;
 
 use crate::checkpoint::{Checkpointable, WeightMap};
 pub struct Tokenizer {
@@ -171,8 +172,23 @@ impl Tokenizer {
 impl Checkpointable for Tokenizer {
     fn to_weight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
-        map.insert_string("id_to_token", self.id_to_token.clone());
+        map.insert_strings("id_to_token", self.id_to_token.clone());
         map.insert_scalar("unk_id", self.unk_id as u64);
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let id_to_token = map.get_strings("id_to_token")?.clone();
+        let unk_id = map.get_scalar("unk_id")? as usize;
+        let vocab: HashMap<String, usize> = id_to_token
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, t)| (t, i))
+            .collect();
+        self.vocab = vocab;
+        self.id_to_token = id_to_token;
+        self.unk_id = unk_id;
+        Ok(())
     }
 }

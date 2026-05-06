@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use rand::RngExt;
 use rand::rng;
 
@@ -302,5 +306,19 @@ impl Checkpointable for MultiHeadAttention {
         map.insert_matrix("w_v", self.w_v.clone());
         map.insert_matrix("w_o", self.w_o.clone());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let n_heads = map.get_scalar("n_heads")? as usize;
+        let d_model = map.get_scalar("d_model")? as usize;
+        let d_head = map.get_scalar("d_head")? as usize;
+        if n_heads != self.n_heads || d_model != self.d_model || d_head != self.d_head {
+            return Err(Error::new(ErrorKind::InvalidData, "mha config mismatch"));
+        }
+        self.w_q = map.get_matrix("w_q")?.clone();
+        self.w_k = map.get_matrix("w_k")?.clone();
+        self.w_v = map.get_matrix("w_v")?.clone();
+        self.w_o = map.get_matrix("w_o")?.clone();
+        Ok(())
     }
 }

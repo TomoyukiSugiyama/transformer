@@ -1,3 +1,7 @@
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Result;
+
 use crate::{
     adam_w::AdamW,
     checkpoint::{Checkpointable, WeightMap},
@@ -111,5 +115,19 @@ impl Checkpointable for LayerNormalization {
         map.insert_vector("gamma", self.gamma.clone());
         map.insert_vector("beta", self.beta.clone());
         map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let gamma = map.get_vector("gamma")?.clone();
+        let beta = map.get_vector("beta")?.clone();
+        if gamma.len() != self.gamma.len() || beta.len() != self.beta.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Layer normalization shape mismatch",
+            ));
+        }
+        self.gamma = gamma;
+        self.beta = beta;
+        Ok(())
     }
 }
