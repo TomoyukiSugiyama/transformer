@@ -1,0 +1,5 @@
+the cat sat on the mat
+the cat sat on the hat
+the dog sat on the log
+the bird sat on the branch
+the fish swam in the lake

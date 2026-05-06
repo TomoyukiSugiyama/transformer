@@ -20,28 +20,39 @@ mod language_model;
 
 mod checkpoint;
 
+use std::fs;
+
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
     layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
 };
 
+fn load_corpus(path: &str) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("corpus file '{}' not found: {}", path, e))
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty()) // 空行スキップ
+        .filter(|l| !l.starts_with('#')) // コメント行スキップ
+        .map(str::to_string)
+        .collect()
+}
+
 fn main() {
-    let corpus = &[
-        "the cat sat on the mat",
-        "the cat sat on the hat",
-        "the dog sat on the log",
-    ];
+    let corpus_strings = load_corpus("corpus/train.txt");
+    let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
+
     let d_model = 64;
     let n_heads = 2;
     let d_ff = 128;
     let n_layers = 2;
     let max_len = 32;
 
-    let mut model = LanguageModel::new(corpus, d_model, n_heads, d_ff, n_layers, max_len);
+    let mut model = LanguageModel::new(&corpus, d_model, n_heads, d_ff, n_layers, max_len);
     let mut opt = AdamW::new(1e-4);
 
     println!("vocab_size: {}", model.tokenizer.vocab_size());
-    for text in corpus {
+    for text in &corpus {
         let ids = model.tokenizer.encode_simple(text);
         println!("train text: {:?} ids: {:?}", text, ids)
     }
@@ -50,7 +61,7 @@ fn main() {
     let end_step = 100;
     for step in 1..=end_step {
         let mut total_loss = 0.0f32;
-        for text in corpus {
+        for text in &corpus {
             let ids = model.tokenizer.encode_simple(text);
             total_loss += model.train_step(&ids, &mut opt, 0usize);
         }
@@ -99,7 +110,7 @@ fn main() {
 
     for step in start_step..=end_step + 100 {
         let mut total_loss = 0.0f32;
-        for text in corpus {
+        for text in &corpus {
             let ids = l_model.tokenizer.encode_simple(text);
             total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
         }
