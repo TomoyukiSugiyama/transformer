@@ -133,7 +133,7 @@ impl MultiHeadAttention {
         // concat_heads backward → head ごとに dl_dconcat をスライス
         let dl_dhead_outs: Vec<Vec<Vec<f32>>> = (0..self.n_heads)
             .map(|h| {
-                let start = h * self.n_heads;
+                let start = h * self.d_head;
                 dl_dconcat
                     .iter()
                     .map(|row| row[start..start + self.d_head].to_vec())
@@ -176,14 +176,14 @@ impl MultiHeadAttention {
 
         // dl_dx = dQ @ W_Q^T + dK @ W_K^T + dV @ W_V^T
         let dx_q = matmul(&dl_dq, &transpose(&self.w_q));
-        let dx_k = matmul(&dl_dq, &transpose(&self.w_k));
-        let dx_v = matmul(&dl_dq, &transpose(&self.w_v));
+        let dx_k = matmul(&dl_dk, &transpose(&self.w_k));
+        let dx_v = matmul(&dl_dv, &transpose(&self.w_v));
 
         let seq = self.cache_x.len();
         (0..seq)
             .map(|i| {
                 (0..self.d_model)
-                    .map(|j| dx_q[i][j] + dx_k[i][j] * dx_v[i][j])
+                    .map(|j| dx_q[i][j] + dx_k[i][j] + dx_v[i][j])
                     .collect()
             })
             .collect()

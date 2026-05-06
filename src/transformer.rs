@@ -38,7 +38,7 @@ impl Transformer {
         self.final_norm
             .apply_gradients(opt, &format!("{prefix}.final_norm"));
         for (i, block) in self.blocks.iter_mut().enumerate() {
-            block.apply_gradients(opt, &format!("{prefix}.{i}.final_norm"));
+            block.apply_gradients(opt, &format!("{prefix}.block{i}.final_norm"));
         }
     }
 }

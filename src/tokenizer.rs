@@ -102,6 +102,16 @@ impl Tokenizer {
         self.encode(text)
     }
 
+    /// 生成用: BOS は付けるが EOS は付けない
+    pub fn encode_prompt(&self, text: &str) -> Vec<usize> {
+        let bos = *self.vocab.get(Self::BOS).unwrap();
+        let mut ids = vec![bos];
+        for token in Self::tokenize_text(text) {
+            ids.push(self.vocab.get(&token).copied().unwrap_or(self.unk_id));
+        }
+        ids
+    }
+
     pub fn encode_with_padding(&self, text: &str, max_len: usize) -> Encoding {
         let pad_id = *self.vocab.get(Self::PAD).unwrap_or(&0);
         let eos_id = *self.vocab.get(Self::EOS).unwrap_or(&0);
@@ -146,4 +156,13 @@ impl Tokenizer {
             attention_mask,
         }
     }
+
+    pub fn bos_id(&self) -> usize {
+        *self.vocab.get(Self::BOS).unwrap_or(&1)
+    }
+
+    pub fn eos_id(&self) -> usize {
+        *self.vocab.get(Self::EOS).unwrap_or(&2)
+    }
+
 }

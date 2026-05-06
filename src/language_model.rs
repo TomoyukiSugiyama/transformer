@@ -1,34 +1,43 @@
 use crate::{
     adam_w::AdamW, cross_entropy_loss::CrossEntropyLoss, embedding::Embedding,
-    multi_head_attention::causal_mask, output_head::OutputHead, transformer::Transformer,
+    multi_head_attention::causal_mask, output_head::OutputHead, sinusoidal_pe::SinusoidalPE,
+    tokenizer::Tokenizer, transformer::Transformer,
 };
 
 pub struct LanguageModel {
+    pub tokenizer: Tokenizer,
     embedding: Embedding,
+    pe: SinusoidalPE,
     transformer: Transformer,
     output_head: OutputHead,
 }
 
 impl LanguageModel {
     pub fn new(
-        vocab_size: usize,
+        corpus: &[&str],
         d_model: usize,
         n_heads: usize,
         d_ff: usize,
         n_layers: usize,
-        pad_id: Option<usize>,
+        max_len: usize,
     ) -> Self {
+        let tokenizer = Tokenizer::build(corpus);
+        let vocab_size = tokenizer.vocab_size();
+        let pad_id = 0usize;
         Self {
-            embedding: Embedding::new(vocab_size, d_model, pad_id),
+            tokenizer,
+            embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
+            pe: SinusoidalPE::new(max_len, d_model),
             transformer: Transformer::new(n_layers, d_model, n_heads, d_ff),
             output_head: OutputHead::new(d_model, vocab_size),
         }
     }
 
-    fn forward(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
+    fn forward_ids(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
-        let x = self.embedding.forward(token_ids);
+        let emb = self.embedding.forward(token_ids);
+        let x = self.pe.forward(&emb);
         let h = self.transformer.forward(&x, Some(&mask));
         self.output_head.forward(&h)
     }
@@ -39,7 +48,8 @@ impl LanguageModel {
 
         let mask = causal_mask(seq);
 
-        let x = self.embedding.forward(token_ids);
+        let emb = self.embedding.forward(token_ids);
+        let x = self.pe.forward(&emb);
         let h = self.transformer.forward(&x, Some(&mask));
 
         let h_shifted = &h[..seq - 1];
@@ -56,6 +66,7 @@ impl LanguageModel {
 
         let dl_dh_shifted = self.output_head.backward(&dl_dlogits);
         let dl_dh_full = pad_grad(dl_dh_shifted, seq);
+        let dl_dh_full = clip_grad_norm(dl_dh_full, 1.0);
         let dl_dx = self.transformer.backward(&dl_dh_full);
         self.embedding.backward(&dl_dx);
 
@@ -66,35 +77,54 @@ impl LanguageModel {
         loss
     }
 
-    pub fn generate(&mut self, prompt: &[usize], max_new_token: usize) -> Vec<usize> {
-        let mut ids = prompt.to_vec();
+    pub fn generate(&mut self, prompt_text: &str, max_new_token: usize) -> String {
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
-            let logits = self.forward(&ids);
+            let logits = self.forward_ids(&ids);
             let last_logits = &logits[ids.len() - 1];
-            let next = OutputHead::greedy(last_logits);
-            ids.push(next);
+            let next_id = OutputHead::greedy(last_logits);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
         }
-
-        ids[prompt.len()..].to_vec()
+        let bos_id = self.tokenizer.bos_id();
+        let start = ids
+            .iter()
+            .position(|&id| id == bos_id)
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        self.tokenizer.decord(&ids[start..])
     }
 
     pub fn generate_top_k(
         &mut self,
-        prompt: &[usize],
+        prompt_text: &str,
         max_new_token: usize,
         k: usize,
         temprature: f32,
-    ) -> Vec<usize> {
-        let mut ids = prompt.to_vec();
+    ) -> String {
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
-            let logits = self.forward(&ids);
+            let logits = self.forward_ids(&ids);
             let last_logits = &logits[ids.len() - 1];
-            let next = OutputHead::top_k_sample(last_logits, k, temprature);
-            ids.push(next);
+            let next_id = OutputHead::top_k_sample(last_logits, k, temprature);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
         }
-
-        ids[prompt.len()..].to_vec()
+        let bos_id = self.tokenizer.bos_id();
+        let start = ids
+            .iter()
+            .position(|&id| id == bos_id)
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        self.tokenizer.decord(&ids[start..])
     }
+
 }
 
 fn pad_grad(mut dl: Vec<Vec<f32>>, seq: usize) -> Vec<Vec<f32>> {
@@ -103,4 +133,18 @@ fn pad_grad(mut dl: Vec<Vec<f32>>, seq: usize) -> Vec<Vec<f32>> {
         dl.push(vec![0.0; d_model]);
     }
     dl
+}
+
+fn clip_grad_norm(mut grads: Vec<Vec<f32>>, max_norm: f32) -> Vec<Vec<f32>> {
+    let norm: f32 = grads
+        .iter()
+        .flatten()
+        .map(|v| v.powi(2))
+        .sum::<f32>()
+        .sqrt();
+    if norm > max_norm {
+        let scale = max_norm / norm;
+        grads.iter_mut().flatten().for_each(|v| *v *= scale);
+    }
+    grads
 }

@@ -1,6 +1,5 @@
 pub struct SinusoidalPE {
     table: Vec<Vec<f32>>,
-    d_model: usize,
 }
 
 impl SinusoidalPE {
@@ -17,7 +16,7 @@ impl SinusoidalPE {
                     .collect()
             })
             .collect();
-        Self { table, d_model }
+        Self { table }
     }
 
     pub fn forward(&self, token_enb: &[Vec<f32>]) -> Vec<Vec<f32>> {

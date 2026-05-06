@@ -18,7 +18,7 @@ impl LayerNormalization {
             gamma: vec![1.0; d_model],
             beta: vec![0.0; d_model],
             eps: 1e-6,
-            grad_gamma: vec![1.0; d_model],
+            grad_gamma: vec![0.0; d_model],
             grad_beta: vec![0.0; d_model],
             cache_x_hat: Vec::new(),
             cache_inv_std: Vec::new(),
@@ -31,7 +31,7 @@ impl LayerNormalization {
         let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
         let inv_std = 1.0 / (var + self.eps).sqrt();
 
-        let x_hat: Vec<f32> = x.iter().map(|v| (v - mean) / inv_std).collect();
+        let x_hat: Vec<f32> = x.iter().map(|v| (v - mean) * inv_std).collect();
 
         let y: Vec<f32> = x_hat
             .iter()

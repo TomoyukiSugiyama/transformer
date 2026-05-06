@@ -55,6 +55,7 @@ impl Embedding {
 
     pub fn backward(&mut self, dl_dx: &[Vec<f32>]) {
         self.grad_weight = vec![vec![0.0; self.d_model]; self.vocab_size];
+        let scale = (self.d_model as f32).sqrt();
 
         for (i, &id) in self.cache_ids.iter().enumerate() {
             if let Some(pad) = self.pad_id {
@@ -64,8 +65,7 @@ impl Embedding {
             }
 
             for j in 0..self.d_model {
-                // 学習の安定性のため scale をかけない
-                self.grad_weight[i][j] += dl_dx[i][j];
+                self.grad_weight[id][j] += dl_dx[i][j] * scale;
             }
         }
     }

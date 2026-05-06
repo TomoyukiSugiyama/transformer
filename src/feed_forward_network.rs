@@ -54,14 +54,14 @@ impl FeedForwardNetwork {
 
     fn gelu(x: f32) -> f32 {
         let c = (2.0_f32 / std::f32::consts::PI).sqrt();
-        0.5 * x * (1.0 + (c * (x + 0.44715 * x.powi(3))).tanh())
+        0.5 * x * (1.0 + (c * (x + 0.044715 * x.powi(3))).tanh())
     }
 
     fn gelu_grad(x: f32) -> f32 {
         let c = (2.0_f32 / std::f32::consts::PI).sqrt();
-        let tanh_val = (c * (x + 0.44715 * x.powi(3))).tanh();
+        let tanh_val = (c * (x + 0.044715 * x.powi(3))).tanh();
         let sech2 = 1.0 - tanh_val.powi(2);
-        0.5 + (1.0 + tanh_val) + 0.5 * x * sech2 * c * (1.0 + 3.0 * 0.44715 * x.powi(2))
+        0.5 * (1.0 + tanh_val) + 0.5 * x * sech2 * c * (1.0 + 3.0 * 0.044715 * x.powi(2))
     }
 
     fn forward_one(&mut self, x: &[f32]) -> Vec<f32> {
