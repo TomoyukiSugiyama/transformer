@@ -1,7 +1,15 @@
+use std::io::Result;
+
 use crate::{
-    adam_w::AdamW, cross_entropy_loss::CrossEntropyLoss, embedding::Embedding,
-    multi_head_attention::causal_mask, output_head::OutputHead, sinusoidal_pe::SinusoidalPE,
-    tokenizer::Tokenizer, transformer::Transformer,
+    adam_w::AdamW,
+    checkpoint::{Checkpointable, WeightMap},
+    cross_entropy_loss::CrossEntropyLoss,
+    embedding::Embedding,
+    multi_head_attention::causal_mask,
+    output_head::OutputHead,
+    sinusoidal_pe::SinusoidalPE,
+    tokenizer::Tokenizer,
+    transformer::Transformer,
 };
 
 pub struct LanguageModel {
@@ -10,6 +18,12 @@ pub struct LanguageModel {
     pe: SinusoidalPE,
     transformer: Transformer,
     output_head: OutputHead,
+    // ハイパーパラメータ
+    d_model: usize,
+    n_heads: usize,
+    d_ff: usize,
+    n_layers: usize,
+    max_len: usize,
 }
 
 impl LanguageModel {
@@ -30,6 +44,11 @@ impl LanguageModel {
             pe: SinusoidalPE::new(max_len, d_model),
             transformer: Transformer::new(n_layers, d_model, n_heads, d_ff),
             output_head: OutputHead::new(d_model, vocab_size),
+            d_model,
+            n_heads,
+            d_ff,
+            n_layers,
+            max_len,
         }
     }
 
@@ -125,6 +144,19 @@ impl LanguageModel {
         self.tokenizer.decord(&ids[start..])
     }
 
+    pub fn save_interface_checkpoint(&self, path: &str) -> Result<()> {
+        let mut map = WeightMap::new();
+        map.insert_scalar("meta.d_model", self.d_model as u64);
+        map.insert_scalar("meta.n_heads", self.n_heads as u64);
+        map.insert_scalar("meta.d_ff", self.d_ff as u64);
+        map.insert_scalar("meta.n_layers", self.n_layers as u64);
+        map.insert_scalar("meta.max_len", self.max_len as u64);
+        map.merge("tokenizer", self.tokenizer.to_weight_map());
+        map.merge("embedding", self.embedding.to_weight_map());
+        map.merge("transformer", self.transformer.to_weight_map());
+        map.merge("output_head", self.output_head.to_weight_map());
+        map.save(path)
+    }
 }
 
 fn pad_grad(mut dl: Vec<Vec<f32>>, seq: usize) -> Vec<Vec<f32>> {

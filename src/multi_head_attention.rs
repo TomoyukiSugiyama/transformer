@@ -2,6 +2,8 @@ use rand::RngExt;
 use rand::rng;
 
 use crate::adam_w::AdamW;
+use crate::checkpoint::Checkpointable;
+use crate::checkpoint::WeightMap;
 use crate::utility::linear;
 
 pub struct MultiHeadAttention {
@@ -287,4 +289,18 @@ pub fn causal_mask(seq_len: usize) -> Vec<Vec<bool>> {
     (0..seq_len)
         .map(|i| (0..seq_len).map(|j| j > i).collect())
         .collect()
+}
+
+impl Checkpointable for MultiHeadAttention {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_scalar("n_heads", self.n_heads as u64);
+        map.insert_scalar("d_model", self.d_model as u64);
+        map.insert_scalar("d_head", self.d_head as u64);
+        map.insert_matrix("w_q", self.w_q.clone());
+        map.insert_matrix("w_k", self.w_k.clone());
+        map.insert_matrix("w_v", self.w_v.clone());
+        map.insert_matrix("w_o", self.w_o.clone());
+        map
+    }
 }

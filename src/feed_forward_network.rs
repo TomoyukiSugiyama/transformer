@@ -2,6 +2,8 @@ use rand::RngExt;
 use rand::rng;
 
 use crate::adam_w::AdamW;
+use crate::checkpoint::Checkpointable;
+use crate::checkpoint::WeightMap;
 
 pub struct FeedForwardNetwork {
     w1: Vec<Vec<f32>>, // (d_model, d_ff)
@@ -187,5 +189,18 @@ impl FeedForwardNetwork {
             &[self.grad_b2.clone()],
         );
         self.b2 = b2_mat.remove(0);
+    }
+}
+
+impl Checkpointable for FeedForwardNetwork {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_scalar("d_model", self.d_model as u64);
+        map.insert_scalar("d_ff", self.d_model as u64);
+        map.insert_matrix("w1", self.w1.clone());
+        map.insert_vector("b1", self.b1.clone());
+        map.insert_matrix("w2", self.w2.clone());
+        map.insert_vector("b2", self.b2.clone());
+        map
     }
 }

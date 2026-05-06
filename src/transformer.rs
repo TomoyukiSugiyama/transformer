@@ -1,5 +1,8 @@
 use crate::{
-    adam_w::AdamW, layer_normalization::LayerNormalization, transformer_block::TransformerBlock,
+    adam_w::AdamW,
+    checkpoint::{Checkpointable, WeightMap},
+    layer_normalization::LayerNormalization,
+    transformer_block::TransformerBlock,
 };
 
 pub struct Transformer {
@@ -40,5 +43,17 @@ impl Transformer {
         for (i, block) in self.blocks.iter_mut().enumerate() {
             block.apply_gradients(opt, &format!("{prefix}.block{i}.final_norm"));
         }
+    }
+}
+
+impl Checkpointable for Transformer {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_scalar("n_layers", self.blocks.len() as u64);
+        for (i, block) in self.blocks.iter().enumerate() {
+            map.merge(&format!("blocks.{i}"), block.to_weight_map());
+        }
+        map.merge("final_norm", self.final_norm.to_weight_map());
+        map
     }
 }

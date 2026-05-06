@@ -1,4 +1,7 @@
-use crate::adam_w::AdamW;
+use crate::{
+    adam_w::AdamW,
+    checkpoint::{Checkpointable, WeightMap},
+};
 
 pub struct LayerNormalization {
     gamma: Vec<f32>,
@@ -99,5 +102,14 @@ impl LayerNormalization {
             &self.grad_gamma,
         );
         opt.step_vector(&format!("{prefix}.beta"), &mut self.beta, &self.grad_beta);
+    }
+}
+
+impl Checkpointable for LayerNormalization {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_vector("gamma", self.gamma.clone());
+        map.insert_vector("beta", self.beta.clone());
+        map
     }
 }

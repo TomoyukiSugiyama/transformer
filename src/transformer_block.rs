@@ -2,6 +2,8 @@ use crate::FeedForwardNetwork;
 use crate::LayerNormalization;
 use crate::MultiHeadAttention;
 use crate::adam_w::AdamW;
+use crate::checkpoint::Checkpointable;
+use crate::checkpoint::WeightMap;
 
 /// Attention → Add&Norm → FFN → Add&Norm
 pub struct TransformerBlock {
@@ -76,4 +78,15 @@ fn residual_add(x: &[Vec<f32>], sublayer_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         .zip(sublayer_out.iter())
         .map(|(xi, si)| xi.iter().zip(si.iter()).map(|(a, b)| a + b).collect())
         .collect()
+}
+
+impl Checkpointable for TransformerBlock {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.merge("mha", self.mha.to_weight_map());
+        map.merge("norm1", self.norm1.to_weight_map());
+        map.merge("ffn", self.ffn.to_weight_map());
+        map.merge("norm2", self.norm2.to_weight_map());
+        map
+    }
 }

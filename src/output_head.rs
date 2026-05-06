@@ -2,6 +2,8 @@ use rand::RngExt;
 use rand::rng;
 
 use crate::adam_w::AdamW;
+use crate::checkpoint::Checkpointable;
+use crate::checkpoint::WeightMap;
 
 pub struct OutputHead {
     w: Vec<Vec<f32>>,
@@ -116,5 +118,15 @@ impl OutputHead {
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
         opt.step_matrix(&format!("{prefix}.w"), &mut self.w, &self.grad_w);
+    }
+}
+
+impl Checkpointable for OutputHead {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_scalar("vocab_size", self.vocab_size as u64);
+        map.insert_scalar("d_model", self.d_model as u64);
+        map.insert_matrix("w", self.w.clone());
+        map
     }
 }

@@ -2,6 +2,8 @@ use rand::RngExt;
 use rand::rng;
 
 use crate::adam_w::AdamW;
+use crate::checkpoint::Checkpointable;
+use crate::checkpoint::WeightMap;
 
 pub struct Embedding {
     weight: Vec<Vec<f32>>,      // [vocab_size, d_model]
@@ -84,5 +86,17 @@ impl Embedding {
                 &self.grad_weight[id],
             );
         }
+    }
+}
+
+impl Checkpointable for Embedding {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_scalar("vocab_size", self.vocab_size as u64);
+        map.insert_scalar("d_model", self.d_model as u64);
+        map.insert_scalar("has_pad_id", self.pad_id.is_some() as u64);
+        map.insert_scalar("has_pad", self.pad_id.unwrap_or(0) as u64);
+        map.insert_matrix("weight", self.weight.clone());
+        map
     }
 }

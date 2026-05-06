@@ -18,6 +18,8 @@ mod cross_entropy_loss;
 
 mod language_model;
 
+mod checkpoint;
+
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
     layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
@@ -41,10 +43,10 @@ fn main() {
     println!("vocab_size: {}", model.tokenizer.vocab_size());
     for text in corpus {
         let ids = model.tokenizer.encode_simple(text);
-        println!("train text: {:?} ids: {:?}", text,ids)
+        println!("train text: {:?} ids: {:?}", text, ids)
     }
     println!("=== 学習 ===");
-    for step in 1..=1000 {
+    for step in 1..=10 {
         let mut total_loss = 0.0f32;
         for text in corpus {
             let ids = model.tokenizer.encode_simple(text);
@@ -59,6 +61,10 @@ fn main() {
             );
         }
     }
+
+    model
+        .save_interface_checkpoint("checkpoints/model.bin")
+        .unwrap();
 
     println!("\n=== 推論 (greedy) ===");
     let prompt = "the cat";
