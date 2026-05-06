@@ -63,7 +63,7 @@ fn main() {
     }
 
     model
-        .save_interface_checkpoint("checkpoints/model.bin")
+        .save_inference_checkpoint("checkpoints/model.bin")
         .unwrap();
 
     println!("\n=== 推論 (greedy) ===");
@@ -78,6 +78,6 @@ fn main() {
     );
 
     println!("\n=== 推論 (loaded) ===");
-    let mut loaded = LanguageModel::load_interface_checlppoint("checkpoints/model.bin").unwrap();
+    let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/model.bin").unwrap();
     println!("generated: \"{}\"", loaded.generate(prompt, 10));
 }

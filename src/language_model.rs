@@ -144,7 +144,7 @@ impl LanguageModel {
         self.tokenizer.decord(&ids[start..])
     }
 
-    pub fn save_interface_checkpoint(&self, path: &str) -> Result<()> {
+    pub fn save_inference_checkpoint(&self, path: &str) -> Result<()> {
         let mut map = WeightMap::new();
         map.insert_scalar("meta.d_model", self.d_model as u64);
         map.insert_scalar("meta.n_heads", self.n_heads as u64);
@@ -158,7 +158,7 @@ impl LanguageModel {
         map.save(path)
     }
 
-    pub fn load_interface_checlppoint(path: &str) -> Result<Self> {
+    pub fn load_inference_checkpoint(path: &str) -> Result<Self> {
         let map = WeightMap::load(path)?;
         let d_model = map.get_scalar("meta.d_model")? as usize;
         let n_heads = map.get_scalar("meta.n_heads")? as usize;
