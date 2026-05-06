@@ -46,7 +46,8 @@ fn main() {
         println!("train text: {:?} ids: {:?}", text, ids)
     }
     println!("=== 学習 ===");
-    for step in 1..=100 {
+    let end_step = 100;
+    for step in 1..=end_step {
         let mut total_loss = 0.0f32;
         for text in corpus {
             let ids = model.tokenizer.encode_simple(text);
@@ -63,7 +64,11 @@ fn main() {
     }
 
     model
-        .save_inference_checkpoint("checkpoints/model.bin")
+        .save_inference_checkpoint("checkpoints/inference.bin")
+        .unwrap();
+
+    model
+        .save_training_checkpoint("checkpoints/training.bin", &opt, end_step)
         .unwrap();
 
     println!("\n=== 推論 (greedy) ===");
@@ -78,6 +83,39 @@ fn main() {
     );
 
     println!("\n=== 推論 (loaded) ===");
-    let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/model.bin").unwrap();
+    let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
     println!("generated: \"{}\"", loaded.generate(prompt, 10));
+
+    println!("=== チェックポイントから再学習 ===");
+    let (mut l_model, mut l_opt, l_end_step) =
+        LanguageModel::load_training_checkpoint("checkpoints/training.bin").unwrap();
+    assert!(end_step == l_end_step);
+    let start_step = l_end_step + 1;
+
+    for step in start_step..=end_step + 100 {
+        let mut total_loss = 0.0f32;
+        for text in corpus {
+            let ids = l_model.tokenizer.encode_simple(text);
+            total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
+        }
+
+        if step % 50 == 0 {
+            println!(
+                "step {:3}  loss: {:.6}",
+                step,
+                total_loss / corpus.len() as f32
+            );
+        }
+    }
+
+    println!("\n=== 推論 (greedy) ===");
+    let prompt = "the cat";
+    println!("prompt: \"{}\"", prompt);
+    println!("generated: \"{}\"", l_model.generate(prompt, 10));
+
+    println!("\n=== 推論 (top-k) ===");
+    println!(
+        "generated: \"{}\"",
+        l_model.generate_top_k(prompt, 10, 3, 0.8)
+    );
 }

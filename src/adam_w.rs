@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::checkpoint::{Checkpointable, WeightMap};
+
 pub struct AdamWParam {
     data: Vec<f32>, // パラメータ本体(W1, W2, b など)
     m: Vec<f32>,    // 一次モーメント
@@ -95,5 +97,60 @@ impl AdamW {
         let mut param_mat = vec![param.clone()];
         self.step_matrix(key, &mut param_mat, &[grad.to_vec()]);
         *param = param_mat.remove(0);
+    }
+}
+
+impl Checkpointable for AdamW {
+    fn to_weight_map(&self) -> crate::checkpoint::WeightMap {
+        let mut map = WeightMap::new();
+
+        map.insert_scalar("lr", self.lr.to_bits() as u64);
+        map.insert_scalar("beta1", self.beta1.to_bits() as u64);
+        map.insert_scalar("beta2", self.beta2.to_bits() as u64);
+        map.insert_scalar("eps", self.eps.to_bits() as u64);
+        map.insert_scalar("wd", self.wd.to_bits() as u64);
+        map.insert_scalar("step_count", self.step_count as u64);
+
+        let mut keys: Vec<_> = self.moments.keys().collect();
+        keys.sort();
+        for key in keys {
+            let p = &self.moments[key];
+            map.insert_vector(&format!("moments.{key}.data"), p.data.clone());
+            map.insert_vector(&format!("moments.{key}.m"), p.m.clone());
+            map.insert_vector(&format!("moments.{key}.v"), p.v.clone());
+        }
+
+        map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> std::io::Result<()> {
+        self.lr = f32::from_bits(map.get_scalar("lr")? as u32);
+        self.beta1 = f32::from_bits(map.get_scalar("beta1")? as u32);
+        self.beta2 = f32::from_bits(map.get_scalar("beta2")? as u32);
+        self.eps = f32::from_bits(map.get_scalar("eps")? as u32);
+        self.wd = f32::from_bits(map.get_scalar("wd")? as u32);
+        self.step_count = map.get_scalar("step_count")? as usize;
+
+        self.moments.clear();
+        let mut param_ids: Vec<String> = map
+            .vector_keys()
+            .filter(|k| k.starts_with("moments.") && k.ends_with(".data"))
+            .map(|k| {
+                k.strip_prefix("moments.")
+                    .unwrap()
+                    .strip_suffix(".data")
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        param_ids.sort();
+
+        for param_id in param_ids {
+            let data = map.get_vector(&format!("moments.{param_id}.data"))?.clone();
+            let m = map.get_vector(&format!("moments.{param_id}.m"))?.clone();
+            let v = map.get_vector(&format!("moments.{param_id}.v"))?.clone();
+            self.moments.insert(param_id, AdamWParam { data, m, v });
+        }
+        Ok(())
     }
 }

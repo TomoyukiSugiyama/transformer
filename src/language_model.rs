@@ -144,7 +144,7 @@ impl LanguageModel {
         self.tokenizer.decord(&ids[start..])
     }
 
-    pub fn save_inference_checkpoint(&self, path: &str) -> Result<()> {
+    fn build_waight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
         map.insert_scalar("meta.d_model", self.d_model as u64);
         map.insert_scalar("meta.n_heads", self.n_heads as u64);
@@ -155,11 +155,21 @@ impl LanguageModel {
         map.merge("embedding", self.embedding.to_weight_map());
         map.merge("transformer", self.transformer.to_weight_map());
         map.merge("output_head", self.output_head.to_weight_map());
+        map
+    }
+
+    pub fn save_inference_checkpoint(&self, path: &str) -> Result<()> {
+        self.build_waight_map().save(path)
+    }
+
+    pub fn save_training_checkpoint(&self, path: &str, opt: &AdamW, step: usize) -> Result<()> {
+        let mut map = self.build_waight_map();
+        map.insert_scalar("meta.step", step as u64);
+        map.merge("optimizer", opt.to_weight_map());
         map.save(path)
     }
 
-    pub fn load_inference_checkpoint(path: &str) -> Result<Self> {
-        let map = WeightMap::load(path)?;
+    fn restore_model(map: &WeightMap) -> Result<Self> {
         let d_model = map.get_scalar("meta.d_model")? as usize;
         let n_heads = map.get_scalar("meta.n_heads")? as usize;
         let d_ff = map.get_scalar("meta.d_ff")? as usize;
@@ -191,6 +201,21 @@ impl LanguageModel {
             .from_weight_map(&map.scoped("output_head"))?;
 
         Ok(model)
+    }
+
+    pub fn load_inference_checkpoint(path: &str) -> Result<Self> {
+        let map = WeightMap::load(path)?;
+        Self::restore_model(&map)
+    }
+
+    pub fn load_training_checkpoint(path: &str) -> Result<(Self, AdamW, usize)> {
+        let map = WeightMap::load(path)?;
+        let model = Self::restore_model(&map)?;
+        let step = map.get_scalar("meta.step")? as usize;
+        let mut opt = AdamW::new(0.0);
+        opt.from_weight_map(&map.scoped("optimizer"))?;
+
+        Ok((model, opt, step))
     }
 }
 

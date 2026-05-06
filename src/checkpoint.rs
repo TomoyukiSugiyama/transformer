@@ -236,6 +236,10 @@ impl WeightMap {
 
         Ok(map)
     }
+
+    pub fn vector_keys(&self) -> impl Iterator<Item = &str> {
+        self.vectors.keys().map(|k| k.as_str())
+    }
 }
 
 fn write_u8<W: Write>(w: &mut W, v: u8) -> io::Result<()> {
