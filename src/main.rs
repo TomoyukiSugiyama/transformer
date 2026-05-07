@@ -25,9 +25,8 @@ use std::fs;
 use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
 
 use crate::{
-    adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, feed_forward_network::FeedForwardNetwork,
-    language_model::LanguageModel, layer_normalization::LayerNormalization,
-    multi_head_attention::MultiHeadAttention,
+    adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
+    layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
 };
 
 fn load_corpus(path: &str) -> Vec<String> {
@@ -67,7 +66,7 @@ impl Config {
             lr: 3e-4,
             end_step: 10000,
             save_every: 500,
-            log_every: 100,
+            log_every: 20,
             batch_size: 16,
         }
     }
@@ -97,6 +96,7 @@ fn run_training_loop(
     start_step: usize,
 ) {
     let pad_id = model.tokenizer.pad_id();
+    let mut ema_loss: Option<f32> = None;
     for step in start_step..=cfg.end_step {
         let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
@@ -108,8 +108,18 @@ fn run_training_loop(
             total_loss += model.train_step(&ids, opt, pad_id);
         }
         let avg_loss = total_loss / batch.len() as f32;
+        let alpha = 0.05;
+        ema_loss = Some(match ema_loss {
+            Some(e) => e * (1.0 - alpha) + avg_loss * alpha,
+            None => avg_loss,
+        });
         if step % cfg.log_every == 0 {
-            println!("step {:5}  loss: {:.6}", step, avg_loss);
+            println!(
+                "step {:5}  loss: {:.6}  ema: {:.4}",
+                step,
+                avg_loss,
+                ema_loss.unwrap()
+            );
         }
         if step % cfg.save_every == 0 {
             let path = format!("checkpoints/step_{step:06}.bin");
