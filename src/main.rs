@@ -63,11 +63,11 @@ impl Config {
             n_layers: 4,
             max_len: 64,
             vocab_size: 1000,
-            lr: 3e-4,
+            lr: 1e-4,
             end_step: 10000,
             save_every: 500,
             log_every: 20,
-            batch_size: 16,
+            batch_size: 32,
         }
     }
 }
