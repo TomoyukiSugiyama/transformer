@@ -23,8 +23,9 @@ mod checkpoint;
 use std::fs;
 
 use crate::{
-    adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
-    layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
+    adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, feed_forward_network::FeedForwardNetwork,
+    language_model::LanguageModel, layer_normalization::LayerNormalization,
+    multi_head_attention::MultiHeadAttention,
 };
 
 fn load_corpus(path: &str) -> Vec<String> {
@@ -41,10 +42,21 @@ fn load_corpus(path: &str) -> Vec<String> {
 fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
-    training_inference(&corpus);
+    // training_inference(&corpus);
+    smoke_test_pbe_tokenizer(&corpus);
 }
 
-fn training_inference(corpus: &[&str]) {
+fn smoke_test_pbe_tokenizer(corpus: &[&str]) {
+    let vocab_size = 1024;
+    let tokenizer = BpeTokenizer::train(corpus, vocab_size);
+    let text = "猫";
+    let ids = tokenizer.encode_simple(text);
+    println!("{:?}", ids);
+    let dec = tokenizer.decord(&ids);
+    println!("{dec}")
+}
+
+fn _training_inference(corpus: &[&str]) {
     let d_model = 64;
     let n_heads = 2;
     let d_ff = 128;
@@ -64,7 +76,7 @@ fn training_inference(corpus: &[&str]) {
     }
     println!("=== 学習 ===");
     let save_every = 50;
-    let end_step = 100;
+    let end_step = 10;
     for step in 1..=end_step {
         let mut total_loss = 0.0f32;
         for text in corpus {
@@ -104,48 +116,48 @@ fn training_inference(corpus: &[&str]) {
         model.generate_top_k(prompt, 10, 3, 0.8)
     );
 
-    println!("\n=== 推論 (loaded) ===");
-    let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
-    println!("generated: \"{}\"", loaded.generate(prompt, 10));
+    // println!("\n=== 推論 (loaded) ===");
+    // let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
+    // println!("generated: \"{}\"", loaded.generate(prompt, 10));
 
-    println!("=== チェックポイントから再学習 ===");
-    let (mut l_model, mut l_opt, l_end_step) =
-        LanguageModel::load_training_checkpoint("checkpoints/latest.bin").unwrap();
-    assert!(end_step == l_end_step);
-    let start_step = l_end_step + 1;
+    // println!("=== チェックポイントから再学習 ===");
+    // let (mut l_model, mut l_opt, l_end_step) =
+    //     LanguageModel::load_training_checkpoint("checkpoints/latest.bin").unwrap();
+    // assert!(end_step == l_end_step);
+    // let start_step = l_end_step + 1;
 
-    for step in start_step..=end_step + 100 {
-        let mut total_loss = 0.0f32;
-        for text in corpus {
-            let ids = l_model.tokenizer.encode_simple(text);
-            total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
-        }
+    // for step in start_step..=end_step + 100 {
+    //     let mut total_loss = 0.0f32;
+    //     for text in corpus {
+    //         let ids = l_model.tokenizer.encode_simple(text);
+    //         total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
+    //     }
 
-        if step % save_every == 0 {
-            let path = format!("checkpoints/step_{step:06}.bin");
-            model
-                .save_training_checkpoint(&path, &opt, end_step)
-                .unwrap();
-            model
-                .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
-                .unwrap();
-            println!("saved: {path}");
-            println!(
-                "step {:3}  loss: {:.6}",
-                step,
-                total_loss / corpus.len() as f32
-            );
-        }
-    }
+    //     if step % save_every == 0 {
+    //         let path = format!("checkpoints/step_{step:06}.bin");
+    //         model
+    //             .save_training_checkpoint(&path, &opt, end_step)
+    //             .unwrap();
+    //         model
+    //             .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
+    //             .unwrap();
+    //         println!("saved: {path}");
+    //         println!(
+    //             "step {:3}  loss: {:.6}",
+    //             step,
+    //             total_loss / corpus.len() as f32
+    //         );
+    //     }
+    // }
 
-    println!("\n=== 推論 (greedy) ===");
-    let prompt = "the cat";
-    println!("prompt: \"{}\"", prompt);
-    println!("generated: \"{}\"", l_model.generate(prompt, 10));
+    // println!("\n=== 推論 (greedy) ===");
+    // let prompt = "the cat";
+    // println!("prompt: \"{}\"", prompt);
+    // println!("generated: \"{}\"", l_model.generate(prompt, 10));
 
-    println!("\n=== 推論 (top-k) ===");
-    println!(
-        "generated: \"{}\"",
-        l_model.generate_top_k(prompt, 10, 3, 0.8)
-    );
+    // println!("\n=== 推論 (top-k) ===");
+    // println!(
+    //     "generated: \"{}\"",
+    //     l_model.generate_top_k(prompt, 10, 3, 0.8)
+    // );
 }

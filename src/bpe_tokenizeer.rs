@@ -27,11 +27,7 @@ fn build_word_freq(corpus: &[&str]) -> HashMap<String, usize> {
     let mut freq: HashMap<String, usize> = HashMap::new();
     for text in corpus {
         for raw in text.split_whitespace() {
-            let word: String = raw
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphabetic())
-                .collect();
+            let word: String = raw.to_lowercase().chars().collect();
             if !word.is_empty() {
                 *freq.entry(word).or_insert(0) += 1;
             }
@@ -40,19 +36,22 @@ fn build_word_freq(corpus: &[&str]) -> HashMap<String, usize> {
     freq
 }
 
+fn byte_token(b: u8) -> String {
+    format!("b{:03}", b)
+}
 /// 単語を文字 + </w> 列に分解
-/// "cat" → ["c", "a", "t</w>"]
-fn split_word(word: &str) -> Vec<String> {
-    let chars: Vec<char> = word.chars().collect();
-    let last = chars.len().saturating_sub(1);
-    chars
+/// "b099b097b116" → ["b099", "b097", "b116</w>"]
+fn split_word_bytes(word: &str) -> Vec<String> {
+    let bytes = word.as_bytes();
+    let last = bytes.len().saturating_sub(1);
+    bytes
         .iter()
         .enumerate()
-        .map(|(i, &c)| {
+        .map(|(i, &b)| {
             if i == last {
-                format!("{}{}", c, WORD_END)
+                format!("{}{}", byte_token(b), WORD_END)
             } else {
-                c.to_string()
+                byte_token(b)
             }
         })
         .collect()
@@ -107,11 +106,14 @@ impl BpeTokenizer {
         for special in [Self::PAD, Self::UNK, Self::BOS, Self::EOS] {
             token_to_id.insert(special.to_string(), token_to_id.len());
         }
-
+        for b in 0..=255 {
+            token_to_id.insert(byte_token(b), token_to_id.len());
+            token_to_id.insert(format!("{}{}", byte_token(b), WORD_END), token_to_id.len());
+        }
         let word_freq = build_word_freq(corpus);
         let mut vocab: Vocab = word_freq
             .iter()
-            .map(|(word, &freq)| (split_word(word), freq))
+            .map(|(word, &freq)| (split_word_bytes(word), freq))
             .collect();
 
         for symbols in vocab.keys() {
@@ -150,7 +152,6 @@ impl BpeTokenizer {
             id_to_token[id] = tok.clone();
         }
         let unk_id: usize = *token_to_id.get(Self::UNK).unwrap();
-
         Self {
             id_to_token,
             token_to_id,
@@ -162,7 +163,7 @@ impl BpeTokenizer {
 
     /// 1単語に学習済みマージを適用して subword 列を返す
     fn encode_word(&self, word: &str) -> Vec<String> {
-        let mut symbols = split_word(word);
+        let mut symbols = split_word_bytes(word);
         loop {
             // ランクが最小（最初にマージされた）ペアを探す
             let best = symbols
@@ -186,15 +187,11 @@ impl BpeTokenizer {
         let eos = self.eos_id();
         let mut ids = vec![bos];
         for raw in text.split_whitespace() {
-            let word: String = raw
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphabetic())
-                .collect();
+            let word = raw.trim_matches(|c: char| c.is_ascii_punctuation());
             if word.is_empty() {
                 continue;
             }
-            for sym in self.encode_word(&word) {
+            for sym in self.encode_word(word) {
                 ids.push(*self.token_to_id.get(&sym).unwrap_or(&self.unk_id));
             }
         }
@@ -214,9 +211,24 @@ impl BpeTokenizer {
         ids
     }
 
+    fn decode_token_to_bytes(tok: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut s = tok;
+        while s.len() >= 4 && s.starts_with('b') {
+            if let Ok(n) = s[1..4].parse::<u8>() {
+                bytes.push(n);
+                s = &s[4..]
+            } else {
+                break;
+            }
+        }
+        bytes
+    }
     pub fn decord(&self, ids: &[usize]) -> String {
         let specials = [Self::PAD, Self::UNK, Self::BOS, Self::EOS];
-        let mut out = String::new();
+        let mut words: Vec<String> = Vec::new();
+        let mut current: Vec<u8> = Vec::new();
+
         for &id in ids {
             let Some(tok) = self.id_to_token.get(id) else {
                 continue;
@@ -224,14 +236,22 @@ impl BpeTokenizer {
             if specials.contains(&tok.as_str()) {
                 continue;
             }
-            if tok.ends_with(WORD_END) {
-                out.push_str(tok.trim_end_matches(WORD_END));
-                out.push(' ');
+            let (tok_body, is_end) = if tok.ends_with(WORD_END) {
+                (tok.trim_end_matches(WORD_END), true)
             } else {
-                out.push_str(tok);
+                (tok.as_str(), false)
+            };
+            current.extend(Self::decode_token_to_bytes(tok_body));
+            if is_end {
+                words.push(String::from_utf8_lossy(&current).into_owned());
+                current.clear();
             }
         }
-        out.trim_end().to_string()
+
+        if !current.is_empty() {
+            words.push(String::from_utf8_lossy(&current).into_owned());
+        }
+        words.join(" ")
     }
 
     pub fn vocab_size(&self) -> usize {
