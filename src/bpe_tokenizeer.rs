@@ -1,4 +1,9 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{Error, ErrorKind, Result},
+};
+
+use crate::checkpoint::{Checkpointable, WeightMap};
 
 const WORD_END: &str = "</w>";
 
@@ -230,5 +235,77 @@ impl BpeTokenizer {
 
     fn eos_id(&self) -> usize {
         *self.token_to_id.get(Self::EOS).unwrap_or(&3)
+    }
+
+    pub fn save(&self,path:&str) -> Result<()>{
+        self.to_weight_map().save(path)
+    }
+
+    pub fn load(path:&str) -> Result<Self>{
+        let map = WeightMap::load(path)?;
+        let mut t = Self{
+            id_to_token:Vec::new(),
+            token_to_id:HashMap::new(),
+            merges: Vec::new(),
+            merge_rank:HashMap::new(),
+            unk_id : 0
+        };
+        t.from_weight_map(&map)?;
+
+        Ok(t)
+    }
+}
+
+impl Checkpointable for BpeTokenizer {
+    fn to_weight_map(&self) -> WeightMap {
+        let mut map = WeightMap::new();
+        map.insert_strings("id_to_token", self.id_to_token.clone());
+        map.insert_scalar("unk_id", self.unk_id as u64);
+
+        let flat_merges: Vec<String> = self
+            .merges
+            .iter()
+            .flat_map(|(a, b)| [a.clone(), b.clone()])
+            .collect();
+        map.insert_strings("merges", flat_merges);
+
+        map
+    }
+
+    fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let id_to_token = map.get_strings("id_to_token")?.clone();
+        let token_to_id: HashMap<String, usize> = id_to_token
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, t)| (t, i))
+            .collect();
+
+        let unk_id = map.get_scalar("unk_id")? as usize;
+
+        let flat = map.get_strings("merges")?;
+        if flat.len() % 2 != 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "merges length must be even",
+            ));
+        }
+        let merges: Vec<(String, String)> = flat
+            .chunks(2)
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .collect();
+        let merge_rank: HashMap<(String, String), usize> = merges
+            .iter()
+            .enumerate()
+            .map(|(i, pair)| (pair.clone(), i))
+            .collect();
+
+        self.id_to_token = id_to_token;
+        self.token_to_id = token_to_id;
+        self.merges = merges;
+        self.merge_rank = merge_rank;
+        self.unk_id = unk_id;
+
+        Ok(())
     }
 }

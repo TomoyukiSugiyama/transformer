@@ -21,7 +21,7 @@ mod language_model;
 
 mod checkpoint;
 
-use std::fs;
+use std::{fs, io::Result};
 
 use crate::{
     adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, feed_forward_network::FeedForwardNetwork,
@@ -44,10 +44,32 @@ fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
     // training_inference(&corpus);
-    smoke_test_bpe(&corpus);
+    // smoke_test_bpe(&corpus);
+    smoke_test_bpe_checkpoint(&corpus).unwrap();
 }
 
-fn smoke_test_bpe(corpus: &[&str]) {
+fn smoke_test_bpe_checkpoint(corpus: &[&str]) -> Result<()> {
+    let tokenizer = BpeTokenizer::train(corpus, 200);
+    println!("[BPE] vocab_size: {}", tokenizer.vocab_size());
+
+    tokenizer.save("checkpoints/bpe_tokenizer.bin")?;
+    println!("[BPE] saved: checkpoints/bpe_tokenizer.bin");
+
+    let loaded = BpeTokenizer::load("checkpoints/bpe_tokenizer.bin")?;
+    println!("[BPE] loaded: vocab_size={}", loaded.vocab_size());
+
+    for text in corpus {
+        let ids_before = tokenizer.encode_simple(text);
+        let ids_after = loaded.encode_simple(text);
+        assert_eq!(ids_before, ids_after, "encode missmatch for {:?}", text);
+
+        println!("[BPE] ok {:?} -> {:?}", text, loaded.decord(&ids_after));
+    }
+
+    Ok(())
+}
+
+fn _smoke_test_bpe(corpus: &[&str]) {
     let tokenizer = BpeTokenizer::train(corpus, 200);
     println!("vocab_size: {}", tokenizer.vocab_size());
 
