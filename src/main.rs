@@ -1,3 +1,4 @@
+mod bpe_tokenizeer;
 mod embedding;
 mod sinusoidal_pe;
 mod tokenizer;
@@ -23,8 +24,9 @@ mod checkpoint;
 use std::fs;
 
 use crate::{
-    adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
-    layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
+    adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, feed_forward_network::FeedForwardNetwork,
+    language_model::LanguageModel, layer_normalization::LayerNormalization,
+    multi_head_attention::MultiHeadAttention,
 };
 
 fn load_corpus(path: &str) -> Vec<String> {
@@ -41,18 +43,34 @@ fn load_corpus(path: &str) -> Vec<String> {
 fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
+    // training_inference(&corpus);
+    smoke_test_bpe(&corpus);
+}
 
+fn smoke_test_bpe(corpus: &[&str]) {
+    let tokenizer = BpeTokenizer::train(corpus, 200);
+    println!("vocab_size: {}", tokenizer.vocab_size());
+
+    for text in corpus {
+        let ids = tokenizer.encode_simple(text);
+        let back = tokenizer.decord(&ids);
+        println!("original: {}", text);
+        println!("decord: {}", back);
+    }
+}
+
+fn _training_inference(corpus: &[&str]) {
     let d_model = 64;
     let n_heads = 2;
     let d_ff = 128;
     let n_layers = 2;
     let max_len = 32;
 
-    let mut model = LanguageModel::new(&corpus, d_model, n_heads, d_ff, n_layers, max_len);
+    let mut model = LanguageModel::new(corpus, d_model, n_heads, d_ff, n_layers, max_len);
     let mut opt = AdamW::new(1e-4);
 
     println!("vocab_size: {}", model.tokenizer.vocab_size());
-    for text in &corpus {
+    for text in corpus {
         let ids = model.tokenizer.encode_simple(text);
         println!("train text: {:?} ids: {:?}", text, ids)
     }
@@ -61,7 +79,7 @@ fn main() {
     let end_step = 100;
     for step in 1..=end_step {
         let mut total_loss = 0.0f32;
-        for text in &corpus {
+        for text in corpus {
             let ids = model.tokenizer.encode_simple(text);
             total_loss += model.train_step(&ids, &mut opt, 0usize);
         }
@@ -110,7 +128,7 @@ fn main() {
 
     for step in start_step..=end_step + 100 {
         let mut total_loss = 0.0f32;
-        for text in &corpus {
+        for text in corpus {
             let ids = l_model.tokenizer.encode_simple(text);
             total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
         }
