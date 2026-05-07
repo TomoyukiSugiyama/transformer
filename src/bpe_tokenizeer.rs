@@ -206,6 +206,14 @@ impl BpeTokenizer {
         self.encode(text)
     }
 
+    pub fn encode_prompt(&self, text: &str) -> Vec<usize> {
+        let mut ids = self.encode(text);
+        if ids.last() == Some(&self.eos_id()) {
+            ids.pop();
+        }
+        ids
+    }
+
     pub fn decord(&self, ids: &[usize]) -> String {
         let specials = [Self::PAD, Self::UNK, Self::BOS, Self::EOS];
         let mut out = String::new();
@@ -229,30 +237,27 @@ impl BpeTokenizer {
     pub fn vocab_size(&self) -> usize {
         self.id_to_token.len()
     }
-    fn bos_id(&self) -> usize {
+
+    pub fn pad_id(&self) -> usize {
+        *self.token_to_id.get(Self::PAD).unwrap_or(&0)
+    }
+
+    pub fn bos_id(&self) -> usize {
         *self.token_to_id.get(Self::BOS).unwrap_or(&2)
     }
 
-    fn eos_id(&self) -> usize {
+    pub fn eos_id(&self) -> usize {
         *self.token_to_id.get(Self::EOS).unwrap_or(&3)
     }
 
-    pub fn save(&self,path:&str) -> Result<()>{
-        self.to_weight_map().save(path)
-    }
-
-    pub fn load(path:&str) -> Result<Self>{
-        let map = WeightMap::load(path)?;
-        let mut t = Self{
-            id_to_token:Vec::new(),
-            token_to_id:HashMap::new(),
+    pub fn empty() -> Self {
+        Self {
+            id_to_token: Vec::new(),
+            token_to_id: HashMap::new(),
             merges: Vec::new(),
-            merge_rank:HashMap::new(),
-            unk_id : 0
-        };
-        t.from_weight_map(&map)?;
-
-        Ok(t)
+            merge_rank: HashMap::new(),
+            unk_id: 0,
+        }
     }
 }
 

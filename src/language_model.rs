@@ -1,19 +1,11 @@
 use std::io::Result;
 
 use crate::{
-    adam_w::AdamW,
-    checkpoint::{Checkpointable, WeightMap},
-    cross_entropy_loss::CrossEntropyLoss,
-    embedding::Embedding,
-    multi_head_attention::causal_mask,
-    output_head::OutputHead,
-    sinusoidal_pe::SinusoidalPE,
-    tokenizer::Tokenizer,
-    transformer::Transformer,
+    adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, checkpoint::{Checkpointable, WeightMap}, cross_entropy_loss::CrossEntropyLoss, embedding::Embedding, multi_head_attention::causal_mask, output_head::OutputHead, sinusoidal_pe::SinusoidalPE, transformer::Transformer
 };
 
 pub struct LanguageModel {
-    pub tokenizer: Tokenizer,
+    pub tokenizer: BpeTokenizer,
     embedding: Embedding,
     pe: SinusoidalPE,
     transformer: Transformer,
@@ -29,15 +21,16 @@ pub struct LanguageModel {
 impl LanguageModel {
     pub fn new(
         corpus: &[&str],
+        vocab_size:usize,
         d_model: usize,
         n_heads: usize,
         d_ff: usize,
         n_layers: usize,
         max_len: usize,
     ) -> Self {
-        let tokenizer = Tokenizer::build(corpus);
+        let tokenizer = BpeTokenizer::train(corpus,vocab_size);
         let vocab_size = tokenizer.vocab_size();
-        let pad_id = 0usize;
+        let pad_id = tokenizer.pad_id();
         Self {
             tokenizer,
             embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
@@ -144,7 +137,7 @@ impl LanguageModel {
         self.tokenizer.decord(&ids[start..])
     }
 
-    fn build_waight_map(&self) -> WeightMap {
+    fn build_weight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
         map.insert_scalar("meta.d_model", self.d_model as u64);
         map.insert_scalar("meta.n_heads", self.n_heads as u64);
@@ -159,11 +152,11 @@ impl LanguageModel {
     }
 
     pub fn save_inference_checkpoint(&self, path: &str) -> Result<()> {
-        self.build_waight_map().save(path)
+        self.build_weight_map().save(path)
     }
 
     pub fn save_training_checkpoint(&self, path: &str, opt: &AdamW, step: usize) -> Result<()> {
-        let mut map = self.build_waight_map();
+        let mut map = self.build_weight_map();
         map.insert_scalar("meta.step", step as u64);
         map.merge("optimizer", opt.to_weight_map());
         map.save(path)
@@ -175,7 +168,7 @@ impl LanguageModel {
         let d_ff = map.get_scalar("meta.d_ff")? as usize;
         let n_layers = map.get_scalar("meta.n_layers")? as usize;
         let max_len = map.get_scalar("meta.max_len")? as usize;
-        let mut tokenizer = Tokenizer::build(&[""]);
+        let mut tokenizer = BpeTokenizer::empty();
         tokenizer.from_weight_map(&map.scoped("tokenizer"))?;
         let vocab_size = tokenizer.vocab_size();
 
