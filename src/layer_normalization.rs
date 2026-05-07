@@ -63,9 +63,6 @@ impl LayerNormalization {
     pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let d = self.gamma.len() as f32;
 
-        self.grad_gamma = vec![0.0; self.gamma.len()];
-        self.grad_beta = vec![0.0; self.beta.len()];
-
         for (dy_row, xh_row) in dl_dy.iter().zip(self.cache_x_hat.iter()) {
             for j in 0..self.gamma.len() {
                 self.grad_gamma[j] += dy_row[j] * xh_row[j];
@@ -97,6 +94,11 @@ impl LayerNormalization {
         }
 
         dl_dx
+    }
+
+    pub fn zero_grad(&mut self) {
+        self.grad_gamma.fill(0.0);
+        self.grad_beta.fill(0.0);
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {

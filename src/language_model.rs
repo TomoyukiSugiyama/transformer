@@ -70,7 +70,7 @@ impl LanguageModel {
         self.output_head.forward(&h)
     }
 
-    pub fn train_step(&mut self, token_ids: &[usize], opt: &mut AdamW, pad_id: usize) -> f32 {
+    pub fn forward_backward(&mut self, token_ids: &[usize], pad_id: usize) -> f32 {
         let seq = token_ids.len();
         assert!(seq >= 2, "seq_len must be >= 2");
 
@@ -91,18 +91,25 @@ impl LanguageModel {
             .collect();
 
         let (loss, dl_dlogits) = CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
-
         let dl_dh_shifted = self.output_head.backward(&dl_dlogits);
         let dl_dh_full = pad_grad(dl_dh_shifted, seq);
         let dl_dh_full = clip_grad_norm(dl_dh_full, 1.0);
         let dl_dx = self.transformer.backward(&dl_dh_full);
         self.embedding.backward(&dl_dx);
 
+        loss
+    }
+
+    pub fn apply_gradients(&mut self, opt: &mut AdamW) {
         self.output_head.apply_gradients(opt, "head");
         self.transformer.apply_gradients(opt, "transformer");
         self.embedding.apply_gradients(opt, "embedding");
+    }
 
-        loss
+    pub fn zero_grad(&mut self) {
+        self.embedding.zero_grad();
+        self.transformer.zero_grad();
+        self.output_head.zero_grad();
     }
 
     pub fn generate(&mut self, prompt_text: &str, max_new_token: usize) -> String {

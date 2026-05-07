@@ -95,10 +95,8 @@ impl OutputHead {
     }
 
     /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
-    /// grad_w を内部に保存する（apply_gradients で使用）
+    /// grad_w を内部に累積する（apply_gradients で使用、バッチ末に zero_grad で初期化）
     pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.grad_w = vec![vec![0.0; self.vocab_size]; self.d_model];
-
         let seq_len = dl_dlogits.len();
         let mut dl_dhidden = vec![vec![0.0f32; self.d_model]; seq_len];
 
@@ -118,6 +116,12 @@ impl OutputHead {
         }
 
         dl_dhidden
+    }
+
+    pub fn zero_grad(&mut self) {
+        for row in &mut self.grad_w {
+            row.fill(0.0);
+        }
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {

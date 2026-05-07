@@ -52,6 +52,7 @@ pub struct AdamW {
     wd: f32,
     step_count: usize,
     moments: HashMap<String, AdamWParam>,
+    grad_scale: f32,
 }
 
 impl AdamW {
@@ -64,14 +65,28 @@ impl AdamW {
             wd: 0.01,
             step_count: 0,
             moments: HashMap::new(),
+            grad_scale: 1.0,
         }
     }
 
-    pub fn step_matrix(&mut self, param_id: &str, w: &mut Vec<Vec<f32>>, grad: &[Vec<f32>]) {
-        self.step_count += 1;
+    pub fn set_grad_scale(&mut self, batch_size: usize) {
+        self.grad_scale = 1.0 / batch_size as f32;
+    }
 
+    pub fn reset_grad_scale(&mut self) {
+        self.grad_scale = 1.0;
+    }
+
+    pub fn increment_step(&mut self) {
+        self.step_count += 1;
+    }
+
+    pub fn step_matrix(&mut self, param_id: &str, w: &mut Vec<Vec<f32>>, grad: &[Vec<f32>]) {
         let flat_w: Vec<f32> = w.iter().flat_map(|row| row.iter().cloned()).collect();
-        let flat_g: Vec<f32> = grad.iter().flat_map(|row| row.iter().cloned()).collect();
+        let flat_g: Vec<f32> = grad
+            .iter()
+            .flat_map(|row| row.iter().cloned().map(|g| g * self.grad_scale))
+            .collect();
 
         let param = self
             .moments

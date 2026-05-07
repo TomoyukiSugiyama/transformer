@@ -65,6 +65,13 @@ impl TransformerBlock {
         residual_add(&dl_dx_from_res, &dl_dx_from_mha)
     }
 
+    pub fn zero_grad(&mut self) {
+        self.mha.zero_grad();
+        self.norm1.zero_grad();
+        self.ffn.zero_grad();
+        self.norm2.zero_grad();
+    }
+
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
         self.mha.apply_gradients(opt, &format!("{prefix}.mha"));
         self.norm1.apply_gradients(opt, &format!("{prefix}.norm1"));

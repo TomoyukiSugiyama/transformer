@@ -41,11 +41,18 @@ impl Transformer {
         d1
     }
 
+    pub fn zero_grad(&mut self) {
+        for block in &mut self.blocks {
+            block.zero_grad();
+        }
+        self.final_norm.zero_grad();
+    }
+
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
         self.final_norm
             .apply_gradients(opt, &format!("{prefix}.final_norm"));
         for (i, block) in self.blocks.iter_mut().enumerate() {
-            block.apply_gradients(opt, &format!("{prefix}.block{i}.final_norm"));
+            block.apply_gradients(opt, &format!("{prefix}.block{i}"));
         }
     }
 }

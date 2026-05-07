@@ -131,8 +131,9 @@ impl MultiHeadAttention {
         use crate::utility::*;
 
         // W_O backward
-        // grad_w_o = concat^T @ dl_dout
-        self.grad_w_o = matmul(&transpose(&self.cache_concat), dl_dout);
+        // grad_w_o += concat^T @ dl_dout
+        let g_w_o = matmul(&transpose(&self.cache_concat), dl_dout);
+        add_matrix_in_place(&mut self.grad_w_o, &g_w_o);
         // dl_dconcat = dl_dout @ W_O^T
         let dl_dconcat = matmul(dl_dout, &transpose(&self.w_o));
 
@@ -175,10 +176,13 @@ impl MultiHeadAttention {
         let dl_dk = self.concat_heads(&dl_dk_heads);
         let dl_dv = self.concat_heads(&dl_dv_heads);
 
-        // W_Q/K/V backward
-        self.grad_w_q = matmul(&transpose(&self.cache_x), &dl_dq);
-        self.grad_w_k = matmul(&transpose(&self.cache_x), &dl_dk);
-        self.grad_w_v = matmul(&transpose(&self.cache_x), &dl_dv);
+        // W_Q/K/V backward (累積)
+        let g_w_q = matmul(&transpose(&self.cache_x), &dl_dq);
+        let g_w_k = matmul(&transpose(&self.cache_x), &dl_dk);
+        let g_w_v = matmul(&transpose(&self.cache_x), &dl_dv);
+        add_matrix_in_place(&mut self.grad_w_q, &g_w_q);
+        add_matrix_in_place(&mut self.grad_w_k, &g_w_k);
+        add_matrix_in_place(&mut self.grad_w_v, &g_w_v);
 
         // dl_dx = dQ @ W_Q^T + dK @ W_K^T + dV @ W_V^T
         let dx_q = matmul(&dl_dq, &transpose(&self.w_q));
@@ -193,6 +197,21 @@ impl MultiHeadAttention {
                     .collect()
             })
             .collect()
+    }
+
+    pub fn zero_grad(&mut self) {
+        for row in &mut self.grad_w_q {
+            row.fill(0.0);
+        }
+        for row in &mut self.grad_w_k {
+            row.fill(0.0);
+        }
+        for row in &mut self.grad_w_v {
+            row.fill(0.0);
+        }
+        for row in &mut self.grad_w_o {
+            row.fill(0.0);
+        }
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {

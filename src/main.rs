@@ -63,7 +63,7 @@ impl Config {
             n_layers: 4,
             max_len: 64,
             vocab_size: 1000,
-            lr: 1e-4,
+            lr: 5e-4,
             end_step: 10000,
             save_every: 500,
             log_every: 20,
@@ -100,14 +100,24 @@ fn run_training_loop(
     for step in start_step..=cfg.end_step {
         let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
+        let mut valid_cout = 0;
         for &&text in &batch {
             let ids = model.tokenizer.encode_simple(text);
             if ids.len() < 2 {
                 continue;
             }
-            total_loss += model.train_step(&ids, opt, pad_id);
+            total_loss += model.forward_backward(&ids, pad_id);
+            valid_cout += 1;
         }
-        let avg_loss = total_loss / batch.len() as f32;
+        let mut avg_loss = 0.0f32;
+        if valid_cout > 0 {
+            opt.set_grad_scale(valid_cout);
+            opt.increment_step();
+            model.apply_gradients(opt);
+            opt.reset_grad_scale();
+            model.zero_grad();
+            avg_loss = total_loss / valid_cout as f32;
+        }
         let alpha = 0.05;
         ema_loss = Some(match ema_loss {
             Some(e) => e * (1.0 - alpha) + avg_loss * alpha,

@@ -115,11 +115,6 @@ impl FeedForwardNetwork {
     pub fn backward(&mut self, dl_dz2: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let seq_len = dl_dz2.len();
 
-        self.grad_w1 = vec![vec![0.0; self.d_ff]; self.d_model];
-        self.grad_b1 = vec![0.0; self.d_ff];
-        self.grad_w2 = vec![vec![0.0; self.d_model]; self.d_ff];
-        self.grad_b2 = vec![0.0; self.d_model];
-
         let mut dl_dx = vec![vec![0.0; self.d_model]; seq_len];
 
         for t in 0..seq_len {
@@ -172,6 +167,17 @@ impl FeedForwardNetwork {
         }
 
         dl_dx
+    }
+
+    pub fn zero_grad(&mut self) {
+        for row in &mut self.grad_w1 {
+            row.fill(0.0);
+        }
+        self.grad_b1.fill(0.0);
+        for row in &mut self.grad_w2 {
+            row.fill(0.0);
+        }
+        self.grad_b2.fill(0.0);
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {

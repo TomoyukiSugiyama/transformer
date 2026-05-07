@@ -37,3 +37,12 @@ pub fn softmax_rows(a: &mut Vec<Vec<f32>>) {
 pub fn linear(x: &[Vec<f32>], w: &[Vec<f32>]) -> Vec<Vec<f32>> {
     matmul(x, w)
 }
+
+/// 行列を in-place で加算: a += b
+pub fn add_matrix_in_place(a: &mut [Vec<f32>], b: &[Vec<f32>]) {
+    for (a_row, b_row) in a.iter_mut().zip(b.iter()) {
+        for (a_v, b_v) in a_row.iter_mut().zip(b_row.iter()) {
+            *a_v += *b_v;
+        }
+    }
+}
