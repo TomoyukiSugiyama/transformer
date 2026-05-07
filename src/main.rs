@@ -22,6 +22,8 @@ mod checkpoint;
 
 use std::fs;
 
+use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
+
 use crate::{
     adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, feed_forward_network::FeedForwardNetwork,
     language_model::LanguageModel, layer_normalization::LayerNormalization,
@@ -39,125 +41,133 @@ fn load_corpus(path: &str) -> Vec<String> {
         .collect()
 }
 
+struct Config {
+    d_model: usize,
+    n_heads: usize,
+    d_ff: usize,
+    n_layers: usize,
+    max_len: usize,
+    vocab_size: usize,
+    lr: f32,
+    end_step: usize,
+    save_every: usize,
+    log_every: usize,
+    batch_size: usize,
+}
+
+impl Config {
+    fn tiny_shakespeare() -> Self {
+        Self {
+            d_model: 128,
+            n_heads: 4,
+            d_ff: 512,
+            n_layers: 4,
+            max_len: 64,
+            vocab_size: 1000,
+            lr: 3e-4,
+            end_step: 10000,
+            save_every: 500,
+            log_every: 100,
+            batch_size: 16,
+        }
+    }
+}
 fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
-    // training_inference(&corpus);
-    smoke_test_pbe_tokenizer(&corpus);
+    let cfg = Config::tiny_shakespeare();
+    training_and_inference(&corpus, &cfg);
+    // training_from_checkpoint(&corpus, &cfg, "checkpoints/step_005000.bin");
+    // inference();
 }
 
-fn smoke_test_pbe_tokenizer(corpus: &[&str]) {
-    let vocab_size = 1024;
-    let tokenizer = BpeTokenizer::train(corpus, vocab_size);
-    let text = "猫";
-    let ids = tokenizer.encode_simple(text);
-    println!("{:?}", ids);
-    let dec = tokenizer.decord(&ids);
-    println!("{dec}")
+#[allow(dead_code)]
+fn inference() {
+    let mut model = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
+    let prompt = "To be or not to be";
+    infer(&mut model, &prompt);
 }
 
-fn _training_inference(corpus: &[&str]) {
-    let d_model = 64;
-    let n_heads = 2;
-    let d_ff = 128;
-    let n_layers = 2;
-    let max_len = 32;
-    let vocab_size = 500;
-
-    let mut model = LanguageModel::new(
-        corpus, vocab_size, d_model, n_heads, d_ff, n_layers, max_len,
-    );
-    let mut opt = AdamW::new(1e-4);
-
-    println!("vocab_size: {}", model.tokenizer.vocab_size());
-    for text in corpus {
-        let ids = model.tokenizer.encode_simple(text);
-        println!("train text: {:?} ids: {:?}", text, ids)
-    }
-    println!("=== 学習 ===");
-    let save_every = 50;
-    let end_step = 10;
-    for step in 1..=end_step {
+fn run_training_loop(
+    model: &mut LanguageModel,
+    opt: &mut AdamW,
+    rng: &mut SmallRng,
+    corpus: &[&str],
+    cfg: &Config,
+    start_step: usize,
+) {
+    let pad_id = model.tokenizer.pad_id();
+    for step in start_step..=cfg.end_step {
+        let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
-        for text in corpus {
+        for &&text in &batch {
             let ids = model.tokenizer.encode_simple(text);
-            total_loss += model.train_step(&ids, &mut opt, 0usize);
+            if ids.len() < 2 {
+                continue;
+            }
+            total_loss += model.train_step(&ids, opt, pad_id);
         }
-
-        if step % save_every == 0 {
+        let avg_loss = total_loss / batch.len() as f32;
+        if step % cfg.log_every == 0 {
+            println!("step {:5}  loss: {:.6}", step, avg_loss);
+        }
+        if step % cfg.save_every == 0 {
             let path = format!("checkpoints/step_{step:06}.bin");
+            model.save_training_checkpoint(&path, opt, step).unwrap();
             model
-                .save_training_checkpoint(&path, &opt, end_step)
-                .unwrap();
-            model
-                .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
+                .save_training_checkpoint("checkpoints/latest.bin", opt, step)
                 .unwrap();
             println!("saved: {path}");
-            println!(
-                "step {:3}  loss: {:.6}",
-                step,
-                total_loss / corpus.len() as f32
-            );
         }
     }
+}
 
+fn training_and_inference(corpus: &[&str], cfg: &Config) {
+    let mut model = LanguageModel::new(
+        corpus,
+        cfg.vocab_size,
+        cfg.d_model,
+        cfg.n_heads,
+        cfg.d_ff,
+        cfg.n_layers,
+        cfg.max_len,
+    );
+    let mut opt = AdamW::new(cfg.lr);
+    let mut rng = SmallRng::seed_from_u64(42);
+    run_training_loop(&mut model, &mut opt, &mut rng, corpus, cfg, 1);
     model
         .save_inference_checkpoint("checkpoints/inference.bin")
         .unwrap();
+    let prompt = "To be or not to be";
+    infer(&mut model, &prompt);
+}
 
-    println!("\n=== 推論 (greedy) ===");
-    let prompt = "the cat";
-    println!("prompt: \"{}\"", prompt);
-    println!("generated: \"{}\"", model.generate(prompt, 10));
-
-    println!("\n=== 推論 (top-k) ===");
-    println!(
-        "generated: \"{}\"",
-        model.generate_top_k(prompt, 10, 3, 0.8)
+#[allow(dead_code)]
+fn training_from_checkpoint(corpus: &[&str], cfg: &Config, path: &str) {
+    let (mut model, mut opt, checkpoint_step) =
+        LanguageModel::load_training_checkpoint(path).unwrap();
+    let mut rng = SmallRng::seed_from_u64(42);
+    // RNG を消費して整合させる（任意）
+    for _ in 0..checkpoint_step {
+        let _: Vec<&&str> = corpus.sample(&mut rng, cfg.batch_size).collect();
+    }
+    run_training_loop(
+        &mut model,
+        &mut opt,
+        &mut rng,
+        corpus,
+        cfg,
+        checkpoint_step + 1,
     );
+    model
+        .save_inference_checkpoint("checkpoints/inference.bin")
+        .unwrap();
+    let prompt = "To be or not to be";
+    infer(&mut model, &prompt);
+}
 
-    // println!("\n=== 推論 (loaded) ===");
-    // let mut loaded = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
-    // println!("generated: \"{}\"", loaded.generate(prompt, 10));
-
-    // println!("=== チェックポイントから再学習 ===");
-    // let (mut l_model, mut l_opt, l_end_step) =
-    //     LanguageModel::load_training_checkpoint("checkpoints/latest.bin").unwrap();
-    // assert!(end_step == l_end_step);
-    // let start_step = l_end_step + 1;
-
-    // for step in start_step..=end_step + 100 {
-    //     let mut total_loss = 0.0f32;
-    //     for text in corpus {
-    //         let ids = l_model.tokenizer.encode_simple(text);
-    //         total_loss += l_model.train_step(&ids, &mut l_opt, 0usize);
-    //     }
-
-    //     if step % save_every == 0 {
-    //         let path = format!("checkpoints/step_{step:06}.bin");
-    //         model
-    //             .save_training_checkpoint(&path, &opt, end_step)
-    //             .unwrap();
-    //         model
-    //             .save_training_checkpoint("checkpoints/latest.bin", &opt, end_step)
-    //             .unwrap();
-    //         println!("saved: {path}");
-    //         println!(
-    //             "step {:3}  loss: {:.6}",
-    //             step,
-    //             total_loss / corpus.len() as f32
-    //         );
-    //     }
-    // }
-
-    // println!("\n=== 推論 (greedy) ===");
-    // let prompt = "the cat";
-    // println!("prompt: \"{}\"", prompt);
-    // println!("generated: \"{}\"", l_model.generate(prompt, 10));
-
-    // println!("\n=== 推論 (top-k) ===");
-    // println!(
-    //     "generated: \"{}\"",
-    //     l_model.generate_top_k(prompt, 10, 3, 0.8)
-    // );
+fn infer(model: &mut LanguageModel, prompt: &str) {
+    println!("\n--- prompt: {:?} ---", prompt);
+    println!("greedy : {}", model.generate(prompt, 100));
+    println!("top-k  : {}", model.generate_top_k(prompt, 100, 5, 0.8));
 }

@@ -1,7 +1,15 @@
 use std::io::Result;
 
 use crate::{
-    adam_w::AdamW, bpe_tokenizeer::BpeTokenizer, checkpoint::{Checkpointable, WeightMap}, cross_entropy_loss::CrossEntropyLoss, embedding::Embedding, multi_head_attention::causal_mask, output_head::OutputHead, sinusoidal_pe::SinusoidalPE, transformer::Transformer
+    adam_w::AdamW,
+    bpe_tokenizeer::BpeTokenizer,
+    checkpoint::{Checkpointable, WeightMap},
+    cross_entropy_loss::CrossEntropyLoss,
+    embedding::Embedding,
+    multi_head_attention::causal_mask,
+    output_head::OutputHead,
+    sinusoidal_pe::SinusoidalPE,
+    transformer::Transformer,
 };
 
 pub struct LanguageModel {
@@ -21,14 +29,14 @@ pub struct LanguageModel {
 impl LanguageModel {
     pub fn new(
         corpus: &[&str],
-        vocab_size:usize,
+        vocab_size: usize,
         d_model: usize,
         n_heads: usize,
         d_ff: usize,
         n_layers: usize,
         max_len: usize,
     ) -> Self {
-        let tokenizer = BpeTokenizer::train(corpus,vocab_size);
+        let tokenizer = BpeTokenizer::train(corpus, vocab_size);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
         Self {
@@ -42,6 +50,14 @@ impl LanguageModel {
             d_ff,
             n_layers,
             max_len,
+        }
+    }
+
+    fn context_window<'a>(&self, ids: &'a [usize]) -> &'a [usize] {
+        if ids.len() > self.max_len {
+            &ids[ids.len() - self.max_len..]
+        } else {
+            ids
         }
     }
 
@@ -93,8 +109,9 @@ impl LanguageModel {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
-            let logits = self.forward_ids(&ids);
-            let last_logits = &logits[ids.len() - 1];
+            let ctx = self.context_window(&ids);
+            let logits = self.forward_ids(ctx);
+            let last_logits = &logits[ctx.len() - 1];
             let next_id = OutputHead::greedy(last_logits);
             if next_id == eos_id {
                 break;
@@ -120,8 +137,9 @@ impl LanguageModel {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
-            let logits = self.forward_ids(&ids);
-            let last_logits = &logits[ids.len() - 1];
+            let ctx = self.context_window(&ids);
+            let logits = self.forward_ids(ctx);
+            let last_logits = &logits[ctx.len() - 1];
             let next_id = OutputHead::top_k_sample(last_logits, k, temprature);
             if next_id == eos_id {
                 break;

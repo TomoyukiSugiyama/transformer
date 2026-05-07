@@ -15,11 +15,6 @@ pub struct BpeTokenizer {
     unk_id: usize,
 }
 
-pub struct Encoding {
-    pub input_ids: Vec<usize>,
-    pub attention_mask: Vec<u8>,
-}
-
 type Vocab = HashMap<Vec<String>, usize>;
 
 /// テキストを小文字化して単語頻度を集計
