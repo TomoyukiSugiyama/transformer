@@ -9,7 +9,7 @@ impl CrossEntropyLoss {
         let probs: Vec<f32> = exps.iter().map(|e| e / sum).collect();
 
         // Loss
-        let loss = -(probs[target] - 1e-10).ln();
+        let loss = -(probs[target] + 1e-10).ln();
 
         // 勾配: dL/d_logit_i = probs[i] - 1(i == target)
         let grad: Vec<f32> = probs

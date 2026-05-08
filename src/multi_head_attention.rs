@@ -250,7 +250,7 @@ fn scaled_dot_product_attention_backward(
     let scale = d_k.sqrt();
 
     // dl_dv = P^T @ dl_dout  [seq, d_head]
-    let dl_dv = matmul(att_w, dl_dout);
+    let dl_dv = matmul(&transpose(att_w), dl_dout);
 
     // dl_dP = dl_dout @ V^T  [seq, seq]
     let dl_dp = matmul(dl_dout, &transpose(v));
