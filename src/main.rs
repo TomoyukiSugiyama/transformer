@@ -1,5 +1,5 @@
 mod adam_w;
-mod bpe_tokenizeer;
+mod bpe_tokenizer;
 mod cross_entropy_loss;
 mod embedding;
 mod feed_forward_network;
@@ -51,7 +51,7 @@ struct Config {
 impl Config {
     fn tiny_shakespeare() -> Self {
         Self {
-            run_name: "concat_corpus",
+            run_name: "batch_size_16",
             d_model: 128,
             n_heads: 4,
             d_ff: 512,
@@ -61,10 +61,10 @@ impl Config {
             lr_max: 3e-4,
             lr_min: 1e-6,
             warmup_steps: 200,
-            end_step: 10000,
+            end_step: 2500,
             save_every: 500,
             log_every: 20,
-            batch_size: 64,
+            batch_size: 16,
         }
     }
 

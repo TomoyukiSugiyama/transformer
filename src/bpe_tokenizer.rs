@@ -256,7 +256,7 @@ impl BpeTokenizer {
         }
         bytes
     }
-    pub fn decord(&self, ids: &[usize]) -> String {
+    pub fn decode(&self, ids: &[usize]) -> String {
         let specials = [Self::PAD, Self::UNK, Self::BOS, Self::EOS];
         let mut words: Vec<String> = Vec::new();
         let mut current: Vec<u8> = Vec::new();

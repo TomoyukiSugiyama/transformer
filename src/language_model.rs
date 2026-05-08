@@ -2,7 +2,7 @@ use std::io::Result;
 
 use crate::{
     adam_w::AdamW,
-    bpe_tokenizeer::BpeTokenizer,
+    bpe_tokenizer::BpeTokenizer,
     checkpoint::{Checkpointable, WeightMap},
     cross_entropy_loss::CrossEntropyLoss,
     embedding::Embedding,
@@ -142,7 +142,7 @@ impl LanguageModel {
             .position(|&id| id == bos_id)
             .map(|p| p + 1)
             .unwrap_or(0);
-        self.tokenizer.decord(&ids[start..])
+        self.tokenizer.decode(&ids[start..])
     }
 
     pub fn generate_top_k(
@@ -170,7 +170,7 @@ impl LanguageModel {
             .position(|&id| id == bos_id)
             .map(|p| p + 1)
             .unwrap_or(0);
-        self.tokenizer.decord(&ids[start..])
+        self.tokenizer.decode(&ids[start..])
     }
 
     fn build_weight_map(&self) -> WeightMap {
