@@ -67,7 +67,7 @@ impl Config {
             end_step: 10000,
             save_every: 500,
             log_every: 20,
-            batch_size: 32,
+            batch_size: 64,
         }
     }
 }
@@ -75,15 +75,16 @@ fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
     let cfg = Config::tiny_shakespeare();
-    training_and_inference(&corpus, &cfg);
-    // training_from_checkpoint(&corpus, &cfg, "checkpoints/step_005000.bin");
-    // inference();
+    // training_and_inference(&corpus, &cfg);
+    // training_from_checkpoint(&corpus, &cfg, 1e-4, "checkpoints/step_002500.bin");
+    // inference_from_checkpoint("checkpoints/step_009000.bin");
 }
 
 #[allow(dead_code)]
-fn inference() {
-    let mut model = LanguageModel::load_inference_checkpoint("checkpoints/inference.bin").unwrap();
-    let prompt = "To be or not to be";
+fn inference_from_checkpoint(path: &str) {
+    let mut model = LanguageModel::load_inference_checkpoint(path).unwrap();
+    // let prompt = "To be or not to be";
+    let prompt = "I have seen";
     infer(&mut model, &prompt);
 }
 
@@ -98,6 +99,17 @@ fn run_training_loop(
     let pad_id = model.tokenizer.pad_id();
     let mut ema_loss: Option<f32> = None;
     for step in start_step..=cfg.end_step {
+        if step == 1000 {
+            opt.set_lr(1e-4);
+        }
+        if step == 3000 {
+            opt.set_lr(5e-5);
+            println!("[lr decay] step {step}: lr -> 5e-5");
+        }
+        if step == 6000 {
+            opt.set_lr(2e-5);
+            println!("[lr decay] step {step}: lr -> 2e-5");
+        }
         let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
         let mut valid_cout = 0;
@@ -142,6 +154,7 @@ fn run_training_loop(
     }
 }
 
+#[allow(dead_code)]
 fn training_and_inference(corpus: &[&str], cfg: &Config) {
     let mut model = LanguageModel::new(
         corpus,
@@ -163,9 +176,10 @@ fn training_and_inference(corpus: &[&str], cfg: &Config) {
 }
 
 #[allow(dead_code)]
-fn training_from_checkpoint(corpus: &[&str], cfg: &Config, path: &str) {
+fn training_from_checkpoint(corpus: &[&str], cfg: &Config, lr: f32, path: &str) {
     let (mut model, mut opt, checkpoint_step) =
         LanguageModel::load_training_checkpoint(path).unwrap();
+    opt.set_lr(lr);
     let mut rng = SmallRng::seed_from_u64(42);
     // RNG を消費して整合させる（任意）
     for _ in 0..checkpoint_step {

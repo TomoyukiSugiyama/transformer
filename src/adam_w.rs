@@ -81,6 +81,10 @@ impl AdamW {
         self.step_count += 1;
     }
 
+    pub fn set_lr(&mut self, lr: f32) {
+        self.lr = lr;
+    }
+
     pub fn step_matrix(&mut self, param_id: &str, w: &mut Vec<Vec<f32>>, grad: &[Vec<f32>]) {
         let flat_w: Vec<f32> = w.iter().flat_map(|row| row.iter().cloned()).collect();
         let flat_g: Vec<f32> = grad
