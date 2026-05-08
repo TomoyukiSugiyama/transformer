@@ -62,7 +62,7 @@ impl Config {
             d_ff: 512,
             n_layers: 4,
             max_len: 64,
-            vocab_size: 1000,
+            vocab_size: 4000,
             lr: 5e-4,
             end_step: 10000,
             save_every: 500,
@@ -75,8 +75,8 @@ fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
     let cfg = Config::tiny_shakespeare();
-    // training_and_inference(&corpus, &cfg);
-    // training_from_checkpoint(&corpus, &cfg, 1e-4, "checkpoints/step_002500.bin");
+    training_and_inference(&corpus, &cfg);
+    // training_from_checkpoint(&corpus, &cfg, "checkpoints/step_002500.bin");
     // inference_from_checkpoint("checkpoints/step_009000.bin");
 }
 
@@ -98,17 +98,20 @@ fn run_training_loop(
 ) {
     let pad_id = model.tokenizer.pad_id();
     let mut ema_loss: Option<f32> = None;
+    let mut window_min = f32::INFINITY;
+    let mut window_max = f32::NEG_INFINITY;
     for step in start_step..=cfg.end_step {
-        if step == 1000 {
+        if step == 1001 {
+            opt.set_lr(2.5e-4);
+            println!("[lr decay] step {step}: lr -> 2.5e-4");
+        }
+        if step == 3001 {
             opt.set_lr(1e-4);
+            println!("[lr decay] step {step}: lr -> 1e-4");
         }
-        if step == 3000 {
+        if step == 6001 {
             opt.set_lr(5e-5);
-            println!("[lr decay] step {step}: lr -> 5e-5");
-        }
-        if step == 6000 {
-            opt.set_lr(2e-5);
-            println!("[lr decay] step {step}: lr -> 2e-5");
+            println!("[lr decay] step {step}: lr ->5e-5");
         }
         let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
@@ -135,13 +138,21 @@ fn run_training_loop(
             Some(e) => e * (1.0 - alpha) + avg_loss * alpha,
             None => avg_loss,
         });
+        if valid_cout > 0 {
+            window_min = window_min.min(avg_loss);
+            window_max = window_max.max(avg_loss);
+        }
         if step % cfg.log_every == 0 {
             println!(
-                "step {:5}  loss: {:.6}  ema: {:.4}",
+                "step {:5}  loss: {:.4}  ema: {:.4}  min: {:.4}  max: {:.4}",
                 step,
                 avg_loss,
-                ema_loss.unwrap()
+                ema_loss.unwrap(),
+                window_min,
+                window_max,
             );
+            window_min = f32::INFINITY;
+            window_max = f32::NEG_INFINITY;
         }
         if step % cfg.save_every == 0 {
             let path = format!("checkpoints/step_{step:06}.bin");
@@ -176,10 +187,9 @@ fn training_and_inference(corpus: &[&str], cfg: &Config) {
 }
 
 #[allow(dead_code)]
-fn training_from_checkpoint(corpus: &[&str], cfg: &Config, lr: f32, path: &str) {
+fn training_from_checkpoint(corpus: &[&str], cfg: &Config, path: &str) {
     let (mut model, mut opt, checkpoint_step) =
         LanguageModel::load_training_checkpoint(path).unwrap();
-    opt.set_lr(lr);
     let mut rng = SmallRng::seed_from_u64(42);
     // RNG を消費して整合させる（任意）
     for _ in 0..checkpoint_step {
