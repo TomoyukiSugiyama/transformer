@@ -27,8 +27,7 @@ use crate::{
 
 /// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
 fn load_corpus(path: &str) -> String {
-    fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("corpus file '{}' not found: {}", path, e))
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("corpus file '{}' not found: {}", path, e))
 }
 
 struct Config {
@@ -46,10 +45,13 @@ struct Config {
     save_every: usize,
     log_every: usize,
     batch_size: usize,
+    prompts: Vec<&'static str>,
 }
 
 impl Config {
     fn tiny_shakespeare() -> Self {
+        let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
+
         Self {
             run_name: "batch_size_16",
             d_model: 128,
@@ -65,6 +67,7 @@ impl Config {
             save_every: 500,
             log_every: 20,
             batch_size: 16,
+            prompts,
         }
     }
 
@@ -77,15 +80,15 @@ fn main() {
     let cfg = Config::tiny_shakespeare();
     // training_and_inference(&corpus_text, &cfg);
     // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/with_lr_sched/step_001500.bin");
-    inference_from_checkpoint("checkpoints/batch_size_16/step_001000.bin");
+    inference_from_checkpoint(&cfg, "checkpoints/batch_size_16/step_001000.bin");
 }
 
 #[allow(dead_code)]
-fn inference_from_checkpoint(path: &str) {
+fn inference_from_checkpoint(cfg: &Config, path: &str) {
     let mut model = LanguageModel::load_inference_checkpoint(path).unwrap();
     // let prompt = "To be or not to be";
     let prompt = "I have seen";
-    infer(&mut model, &prompt);
+    infer(&mut model, &cfg.prompts);
 }
 
 fn run_training_loop(
@@ -113,9 +116,27 @@ fn run_training_loop(
     let max_offset = token_ids.len() - chunk_len;
 
     println!("# run_name={}", cfg.run_name);
-    println!("# d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}", cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.n_layers, cfg.max_len, cfg.vocab_size);
-    println!("# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}", cfg.lr_max, cfg.lr_min, cfg.warmup_steps, cfg.end_step, cfg.batch_size, cfg.log_every, cfg.save_every, start_step);
-    println!("# corpus_tokens={}, chunk_len={}, max_offset={}", token_ids.len(), chunk_len, max_offset);
+    println!(
+        "# d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}",
+        cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.n_layers, cfg.max_len, cfg.vocab_size
+    );
+    println!(
+        "# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}",
+        cfg.lr_max,
+        cfg.lr_min,
+        cfg.warmup_steps,
+        cfg.end_step,
+        cfg.batch_size,
+        cfg.log_every,
+        cfg.save_every,
+        start_step
+    );
+    println!(
+        "# corpus_tokens={}, chunk_len={}, max_offset={}",
+        token_ids.len(),
+        chunk_len,
+        max_offset
+    );
     println!("step,loss,ema,min,max,lr");
 
     for step in start_step..=cfg.end_step {
@@ -189,8 +210,7 @@ fn training_and_inference(corpus_text: &str, cfg: &Config) {
     run_training_loop(&mut model, &mut opt, &mut rng, &token_ids, cfg, 1);
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
-    let prompt = "I have seen";
-    infer(&mut model, &prompt);
+    infer(&mut model, &cfg.prompts);
 }
 
 #[allow(dead_code)]
@@ -214,11 +234,12 @@ fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
     );
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
-    let prompt = "I have seen";
-    infer(&mut model, &prompt);
+    infer(&mut model, &cfg.prompts);
 }
 
-fn infer(model: &mut LanguageModel, prompt: &str) {
-    println!("\n--- prompt: {:?} ---", prompt);
-    println!("[top-k]\n{}", model.generate_top_k(prompt, 100, 5, 1.0));
+fn infer(model: &mut LanguageModel, prompts: &[&str]) {
+    for prompt in prompts {
+        println!("\n--- prompt: {:?} ---", prompt);
+        println!("\n{}", model.generate_top_k(prompt, 100, 5, 1.0));
+    }
 }
