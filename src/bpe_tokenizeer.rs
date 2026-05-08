@@ -182,7 +182,8 @@ impl BpeTokenizer {
         let eos = self.eos_id();
         let mut ids = vec![bos];
         for raw in text.split_whitespace() {
-            let word = raw.trim_matches(|c: char| c.is_ascii_punctuation());
+            let lowered = raw.to_lowercase();
+            let word = lowered.trim_matches(|c: char| c.is_ascii_punctuation());
             if word.is_empty() {
                 continue;
             }

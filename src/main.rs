@@ -81,9 +81,9 @@ fn main() {
     let corpus_strings = load_corpus("corpus/train.txt");
     let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
     let cfg = Config::tiny_shakespeare();
-    training_and_inference(&corpus, &cfg);
+    // training_and_inference(&corpus, &cfg);
     // training_from_checkpoint(&corpus, &cfg, "checkpoints/step_002500.bin");
-    // inference_from_checkpoint("checkpoints/step_009000.bin");
+    inference_from_checkpoint("checkpoints/with_lr_sched/step_001000.bin");
 }
 
 #[allow(dead_code)]
