@@ -75,9 +75,9 @@ impl Config {
 fn main() {
     let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
-    training_and_inference(&corpus_text, &cfg);
-    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/concat_corpus/latest.bin");
-    // inference_from_checkpoint("checkpoints/concat_corpus/latest.bin");
+    // training_and_inference(&corpus_text, &cfg);
+    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/with_lr_sched/step_001500.bin");
+    inference_from_checkpoint("checkpoints/batch_size_16/step_001000.bin");
 }
 
 #[allow(dead_code)]
@@ -220,6 +220,5 @@ fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
 
 fn infer(model: &mut LanguageModel, prompt: &str) {
     println!("\n--- prompt: {:?} ---", prompt);
-    println!("greedy : {}", model.generate(prompt, 100));
-    println!("top-k  : {}", model.generate_top_k(prompt, 100, 5, 0.8));
+    println!("[top-k]\n{}", model.generate_top_k(prompt, 100, 5, 1.0));
 }

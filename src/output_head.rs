@@ -56,6 +56,7 @@ impl OutputHead {
         exps.iter().map(|e| e / sum).collect()
     }
 
+    #[allow(dead_code)]
     pub fn greedy(probs: &[f32]) -> usize {
         probs
             .iter()

@@ -123,6 +123,7 @@ impl LanguageModel {
         self.output_head.zero_grad();
     }
 
+    #[allow(dead_code)]
     pub fn generate(&mut self, prompt_text: &str, max_new_token: usize) -> String {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
