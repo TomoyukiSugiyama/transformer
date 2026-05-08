@@ -17,7 +17,7 @@ mod lr_scheduler;
 
 use std::fs;
 
-use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
@@ -25,15 +25,10 @@ use crate::{
     multi_head_attention::MultiHeadAttention,
 };
 
-fn load_corpus(path: &str) -> Vec<String> {
+/// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
+fn load_corpus(path: &str) -> String {
     fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("corpus file '{}' not found: {}", path, e))
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty()) // 空行スキップ
-        .filter(|l| !l.starts_with('#')) // コメント行スキップ
-        .map(str::to_string)
-        .collect()
 }
 
 struct Config {
@@ -56,7 +51,7 @@ struct Config {
 impl Config {
     fn tiny_shakespeare() -> Self {
         Self {
-            run_name: "with_lr_sched",
+            run_name: "concat_corpus",
             d_model: 128,
             n_heads: 4,
             d_ff: 512,
@@ -78,12 +73,11 @@ impl Config {
     }
 }
 fn main() {
-    let corpus_strings = load_corpus("corpus/train.txt");
-    let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
+    let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
-    // training_and_inference(&corpus, &cfg);
-    // training_from_checkpoint(&corpus, &cfg, "checkpoints/step_002500.bin");
-    inference_from_checkpoint("checkpoints/with_lr_sched/step_001000.bin");
+    training_and_inference(&corpus_text, &cfg);
+    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/concat_corpus/latest.bin");
+    // inference_from_checkpoint("checkpoints/concat_corpus/latest.bin");
 }
 
 #[allow(dead_code)]
@@ -98,7 +92,7 @@ fn run_training_loop(
     model: &mut LanguageModel,
     opt: &mut AdamW,
     rng: &mut SmallRng,
-    corpus: &[&str],
+    token_ids: &[usize],
     cfg: &Config,
     start_step: usize,
 ) {
@@ -111,23 +105,28 @@ fn run_training_loop(
     let ckpt_dir = cfg.checkpoint_dir();
     fs::create_dir_all(&ckpt_dir).unwrap();
 
+    let chunk_len = cfg.max_len;
+    assert!(
+        token_ids.len() > chunk_len,
+        "tokenized corpus is shorter than chunk_len; cannot sample windows"
+    );
+    let max_offset = token_ids.len() - chunk_len;
+
     println!("# run_name={}", cfg.run_name);
     println!("# d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}", cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.n_layers, cfg.max_len, cfg.vocab_size);
     println!("# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}", cfg.lr_max, cfg.lr_min, cfg.warmup_steps, cfg.end_step, cfg.batch_size, cfg.log_every, cfg.save_every, start_step);
+    println!("# corpus_tokens={}, chunk_len={}, max_offset={}", token_ids.len(), chunk_len, max_offset);
     println!("step,loss,ema,min,max,lr");
 
     for step in start_step..=cfg.end_step {
         let lr = lr_scheduler.get_lr(step);
         opt.set_lr(lr);
-        let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
         let mut valid_cout = 0;
-        for &&text in &batch {
-            let ids = model.tokenizer.encode_simple(text);
-            if ids.len() < 2 {
-                continue;
-            }
-            total_loss += model.forward_backward(&ids, pad_id);
+        for _ in 0..cfg.batch_size {
+            let offset = rng.random_range(0..=max_offset);
+            let chunk = &token_ids[offset..offset + chunk_len];
+            total_loss += model.forward_backward(chunk, pad_id);
             valid_cout += 1;
         }
         let mut avg_loss = 0.0f32;
@@ -174,9 +173,9 @@ fn run_training_loop(
 }
 
 #[allow(dead_code)]
-fn training_and_inference(corpus: &[&str], cfg: &Config) {
+fn training_and_inference(corpus_text: &str, cfg: &Config) {
     let mut model = LanguageModel::new(
-        corpus,
+        corpus_text,
         cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,
@@ -184,35 +183,38 @@ fn training_and_inference(corpus: &[&str], cfg: &Config) {
         cfg.n_layers,
         cfg.max_len,
     );
+    let token_ids = model.tokenize_corpus(corpus_text);
     let mut opt = AdamW::new(cfg.lr_max);
     let mut rng = SmallRng::seed_from_u64(42);
-    run_training_loop(&mut model, &mut opt, &mut rng, corpus, cfg, 1);
+    run_training_loop(&mut model, &mut opt, &mut rng, &token_ids, cfg, 1);
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
-    let prompt = "To be or not to be";
+    let prompt = "I have seen";
     infer(&mut model, &prompt);
 }
 
 #[allow(dead_code)]
-fn training_from_checkpoint(corpus: &[&str], cfg: &Config, path: &str) {
+fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
     let (mut model, mut opt, checkpoint_step) =
         LanguageModel::load_training_checkpoint(path).unwrap();
+    let token_ids = model.tokenize_corpus(corpus_text);
     let mut rng = SmallRng::seed_from_u64(42);
-    // RNG を消費して整合させる（任意）
-    for _ in 0..checkpoint_step {
-        let _: Vec<&&str> = corpus.sample(&mut rng, cfg.batch_size).collect();
+    // RNG を消費して整合させる（任意）: 各 step で batch_size 回 random_range を呼んでいたため
+    let max_offset = token_ids.len() - cfg.max_len;
+    for _ in 0..(checkpoint_step * cfg.batch_size) {
+        let _ = rng.random_range(0..=max_offset);
     }
     run_training_loop(
         &mut model,
         &mut opt,
         &mut rng,
-        corpus,
+        &token_ids,
         cfg,
         checkpoint_step + 1,
     );
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
-    let prompt = "To be or not to be";
+    let prompt = "I have seen";
     infer(&mut model, &prompt);
 }
 

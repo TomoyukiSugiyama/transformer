@@ -28,7 +28,7 @@ pub struct LanguageModel {
 
 impl LanguageModel {
     pub fn new(
-        corpus: &[&str],
+        corpus_text: &str,
         vocab_size: usize,
         d_model: usize,
         n_heads: usize,
@@ -36,7 +36,7 @@ impl LanguageModel {
         n_layers: usize,
         max_len: usize,
     ) -> Self {
-        let tokenizer = BpeTokenizer::train(corpus, vocab_size);
+        let tokenizer = BpeTokenizer::train(corpus_text, vocab_size);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
         Self {
@@ -51,6 +51,17 @@ impl LanguageModel {
             n_layers,
             max_len,
         }
+    }
+
+    /// 学習用に全コーパスを事前トークナイズ。
+    /// BOS + content + EOS の token id 列を返す。
+    pub fn tokenize_corpus(&self, text: &str) -> Vec<usize> {
+        self.tokenizer.encode_long(text)
+    }
+
+    #[allow(dead_code)]
+    pub fn max_len(&self) -> usize {
+        self.max_len
     }
 
     fn context_window<'a>(&self, ids: &'a [usize]) -> &'a [usize] {

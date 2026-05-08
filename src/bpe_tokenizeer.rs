@@ -17,15 +17,51 @@ pub struct BpeTokenizer {
 
 type Vocab = HashMap<Vec<String>, usize>;
 
-/// テキストを小文字化して単語頻度を集計
-fn build_word_freq(corpus: &[&str]) -> HashMap<String, usize> {
-    let mut freq: HashMap<String, usize> = HashMap::new();
-    for text in corpus {
-        for raw in text.split_whitespace() {
-            let word: String = raw.to_lowercase().chars().collect();
-            if !word.is_empty() {
-                *freq.entry(word).or_insert(0) += 1;
+/// 文末・節区切りを示す句読点を独立トークンとして切り出す対象。
+/// アポストロフィ ('), ハイフン (-), 引用符 (") などは単語の一部として残す。
+fn is_split_punct(ch: char) -> bool {
+    matches!(ch, '.' | ',' | ';' | ':' | '!' | '?')
+}
+
+/// テキストを「単語」「改行」「句読点」に分割して保持。
+/// 元の構造を保つため、改行は独立した "\n" トークン、
+/// 主要な句読点 (. , ; : ! ?) も独立した 1 文字トークンとして扱う。
+/// 例: "Hello, world!\nNext" → ["Hello", ",", "world", "!", "\n", "Next"]
+fn pretokenize(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '\n' {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
             }
+            tokens.push("\n".to_string());
+        } else if ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else if is_split_punct(ch) {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            tokens.push(ch.to_string());
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// テキストを小文字化して単語頻度を集計（改行も 1 つの単語として扱う）
+fn build_word_freq(text: &str) -> HashMap<String, usize> {
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for raw in pretokenize(text) {
+        let word = raw.to_lowercase();
+        if !word.is_empty() {
+            *freq.entry(word).or_insert(0) += 1;
         }
     }
     freq
@@ -96,7 +132,7 @@ impl BpeTokenizer {
     pub const BOS: &'static str = "<BOS>";
     pub const EOS: &'static str = "<EOS>";
 
-    pub fn train(corpus: &[&str], vocab_size: usize) -> Self {
+    pub fn train(text: &str, vocab_size: usize) -> Self {
         let mut token_to_id: HashMap<String, usize> = HashMap::new();
         for special in [Self::PAD, Self::UNK, Self::BOS, Self::EOS] {
             token_to_id.insert(special.to_string(), token_to_id.len());
@@ -105,7 +141,7 @@ impl BpeTokenizer {
             token_to_id.insert(byte_token(b), token_to_id.len());
             token_to_id.insert(format!("{}{}", byte_token(b), WORD_END), token_to_id.len());
         }
-        let word_freq = build_word_freq(corpus);
+        let word_freq = build_word_freq(text);
         let mut vocab: Vocab = word_freq
             .iter()
             .map(|(word, &freq)| (split_word_bytes(word), freq))
@@ -177,33 +213,33 @@ impl BpeTokenizer {
         }
         symbols
     }
-    fn encode(&self, text: &str) -> Vec<usize> {
-        let bos = self.bos_id();
-        let eos = self.eos_id();
-        let mut ids = vec![bos];
-        for raw in text.split_whitespace() {
-            let lowered = raw.to_lowercase();
-            let word = lowered.trim_matches(|c: char| c.is_ascii_punctuation());
+    /// テキストを「pretokenize → 小文字化 → BPE」して ID 列に変換（特殊トークンなし）
+    fn encode_inner(&self, text: &str) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for raw in pretokenize(text) {
+            let word = raw.to_lowercase();
             if word.is_empty() {
                 continue;
             }
-            for sym in self.encode_word(word) {
+            for sym in self.encode_word(&word) {
                 ids.push(*self.token_to_id.get(&sym).unwrap_or(&self.unk_id));
             }
         }
-        ids.push(eos);
         ids
     }
 
-    pub fn encode_simple(&self, text: &str) -> Vec<usize> {
-        self.encode(text)
+    /// 学習用：先頭に BOS、末尾に EOS を付ける（コーパス全体を 1 度だけエンコード）
+    pub fn encode_long(&self, text: &str) -> Vec<usize> {
+        let mut ids = vec![self.bos_id()];
+        ids.extend(self.encode_inner(text));
+        ids.push(self.eos_id());
+        ids
     }
 
+    /// 推論プロンプト用：先頭に BOS のみ付ける
     pub fn encode_prompt(&self, text: &str) -> Vec<usize> {
-        let mut ids = self.encode(text);
-        if ids.last() == Some(&self.eos_id()) {
-            ids.pop();
-        }
+        let mut ids = vec![self.bos_id()];
+        ids.extend(self.encode_inner(text));
         ids
     }
 
@@ -247,7 +283,25 @@ impl BpeTokenizer {
         if !current.is_empty() {
             words.push(String::from_utf8_lossy(&current).into_owned());
         }
-        words.join(" ")
+
+        // 改行は前後にスペースを入れず、句読点は前にスペースを入れない。
+        // それ以外の単語間にはスペースを入れる。
+        let mut out = String::new();
+        for word in &words {
+            if word == "\n" {
+                out.push('\n');
+            } else if word.chars().count() == 1
+                && word.chars().next().is_some_and(is_split_punct)
+            {
+                out.push_str(word);
+            } else {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push_str(word);
+            }
+        }
+        out
     }
 
     pub fn vocab_size(&self) -> usize {
