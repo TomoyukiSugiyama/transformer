@@ -122,7 +122,7 @@ impl MultiHeadAttention {
         self.cache_v = v;
         self.cache_concat = concat;
         self.cache_att_w = all_waights.clone();
-        self.cache_v_head = head_outputs;
+        self.cache_v_head = v_heads;
 
         (output, all_waights)
     }
