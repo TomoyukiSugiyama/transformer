@@ -1,24 +1,19 @@
+mod adam_w;
 mod bpe_tokenizeer;
+mod cross_entropy_loss;
 mod embedding;
-mod sinusoidal_pe;
-
-mod multi_head_attention;
-mod utility;
-
 mod feed_forward_network;
+mod language_model;
 mod layer_normalization;
-
+mod multi_head_attention;
+mod output_head;
+mod sinusoidal_pe;
 mod transformer;
 mod transformer_block;
-
-mod output_head;
-
-mod adam_w;
-mod cross_entropy_loss;
-
-mod language_model;
+mod utility;
 
 mod checkpoint;
+mod lr_scheduler;
 
 use std::fs;
 
@@ -26,7 +21,8 @@ use rand::{SeedableRng, rngs::SmallRng, seq::IndexedRandom};
 
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
-    layer_normalization::LayerNormalization, multi_head_attention::MultiHeadAttention,
+    layer_normalization::LayerNormalization, lr_scheduler::LrScheduler,
+    multi_head_attention::MultiHeadAttention,
 };
 
 fn load_corpus(path: &str) -> Vec<String> {
@@ -41,13 +37,16 @@ fn load_corpus(path: &str) -> Vec<String> {
 }
 
 struct Config {
+    run_name: &'static str,
     d_model: usize,
     n_heads: usize,
     d_ff: usize,
     n_layers: usize,
     max_len: usize,
     vocab_size: usize,
-    lr: f32,
+    lr_max: f32,
+    lr_min: f32,
+    warmup_steps: usize,
     end_step: usize,
     save_every: usize,
     log_every: usize,
@@ -57,18 +56,25 @@ struct Config {
 impl Config {
     fn tiny_shakespeare() -> Self {
         Self {
+            run_name: "with_lr_sched",
             d_model: 128,
             n_heads: 4,
             d_ff: 512,
             n_layers: 4,
             max_len: 64,
             vocab_size: 4000,
-            lr: 5e-4,
+            lr_max: 3e-4,
+            lr_min: 1e-6,
+            warmup_steps: 200,
             end_step: 10000,
             save_every: 500,
             log_every: 20,
             batch_size: 64,
         }
+    }
+
+    fn checkpoint_dir(&self) -> String {
+        format!("checkpoints/{}", self.run_name)
     }
 }
 fn main() {
@@ -100,19 +106,19 @@ fn run_training_loop(
     let mut ema_loss: Option<f32> = None;
     let mut window_min = f32::INFINITY;
     let mut window_max = f32::NEG_INFINITY;
+    let lr_scheduler = LrScheduler::new(cfg.lr_max, cfg.lr_min, cfg.warmup_steps, cfg.end_step);
+
+    let ckpt_dir = cfg.checkpoint_dir();
+    fs::create_dir_all(&ckpt_dir).unwrap();
+
+    println!("# run_name={}", cfg.run_name);
+    println!("# d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}", cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.n_layers, cfg.max_len, cfg.vocab_size);
+    println!("# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}", cfg.lr_max, cfg.lr_min, cfg.warmup_steps, cfg.end_step, cfg.batch_size, cfg.log_every, cfg.save_every, start_step);
+    println!("step,loss,ema,min,max,lr");
+
     for step in start_step..=cfg.end_step {
-        if step == 1001 {
-            opt.set_lr(2.5e-4);
-            println!("[lr decay] step {step}: lr -> 2.5e-4");
-        }
-        if step == 3001 {
-            opt.set_lr(1e-4);
-            println!("[lr decay] step {step}: lr -> 1e-4");
-        }
-        if step == 6001 {
-            opt.set_lr(5e-5);
-            println!("[lr decay] step {step}: lr ->5e-5");
-        }
+        let lr = lr_scheduler.get_lr(step);
+        opt.set_lr(lr);
         let batch: Vec<&&str> = corpus.sample(rng, cfg.batch_size).collect();
         let mut total_loss = 0.0f32;
         let mut valid_cout = 0;
@@ -144,21 +150,23 @@ fn run_training_loop(
         }
         if step % cfg.log_every == 0 {
             println!(
-                "step {:5}  loss: {:.4}  ema: {:.4}  min: {:.4}  max: {:.4}",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.3e}",
                 step,
                 avg_loss,
                 ema_loss.unwrap(),
                 window_min,
                 window_max,
+                lr,
             );
             window_min = f32::INFINITY;
             window_max = f32::NEG_INFINITY;
         }
         if step % cfg.save_every == 0 {
-            let path = format!("checkpoints/step_{step:06}.bin");
+            let path = format!("{ckpt_dir}/step_{step:06}.bin");
+            let latest_path = format!("{ckpt_dir}/latest.bin");
             model.save_training_checkpoint(&path, opt, step).unwrap();
             model
-                .save_training_checkpoint("checkpoints/latest.bin", opt, step)
+                .save_training_checkpoint(&latest_path, opt, step)
                 .unwrap();
             println!("saved: {path}");
         }
@@ -176,12 +184,11 @@ fn training_and_inference(corpus: &[&str], cfg: &Config) {
         cfg.n_layers,
         cfg.max_len,
     );
-    let mut opt = AdamW::new(cfg.lr);
+    let mut opt = AdamW::new(cfg.lr_max);
     let mut rng = SmallRng::seed_from_u64(42);
     run_training_loop(&mut model, &mut opt, &mut rng, corpus, cfg, 1);
-    model
-        .save_inference_checkpoint("checkpoints/inference.bin")
-        .unwrap();
+    let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
+    model.save_inference_checkpoint(&inference_path).unwrap();
     let prompt = "To be or not to be";
     infer(&mut model, &prompt);
 }
@@ -203,9 +210,8 @@ fn training_from_checkpoint(corpus: &[&str], cfg: &Config, path: &str) {
         cfg,
         checkpoint_step + 1,
     );
-    model
-        .save_inference_checkpoint("checkpoints/inference.bin")
-        .unwrap();
+    let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
+    model.save_inference_checkpoint(&inference_path).unwrap();
     let prompt = "To be or not to be";
     infer(&mut model, &prompt);
 }
