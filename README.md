@@ -197,6 +197,11 @@ unsafe { matrixmultiply::sgemm(...) }     // pure-Rust SIMD カーネル
 - `lr_min` を `0` 付近にすると終盤が完全に止まるため、 **`1e-5` 程度のフロアを残す**。
 - checkpoint から `end_step` を伸ばして再開すると、 scheduler の進捗がリセットされて lr が上振れする (**warm restart 効果**)。 停滞局所解からの脱出に使える。
 
+![lr スケジューラ (warmup 200 step + cosine decay, lr_max=3e-4 → lr_min=1e-5)](docs/lr_schedule.png)
+
+実際のスケジュール (`end_step=10000`)。 200 step で `lr_max=3e-4` まで一気に立ち上がり、 そこから cosine で
+`lr_min=1e-5` まで滑らかに減衰する。 序盤の急峻な warmup と、 終盤の floor (完全に 0 にしない) が肝。
+
 ### バッチとミニバッチ勾配
 - `batch_size` 個の `forward_backward` で勾配を累積し、 まとめて 1 回 `apply_gradients` する。
 - AdamW の `step_count` も 1 step に 1 回しか進めない (パラメータごとに進めない)。
@@ -218,6 +223,12 @@ unsafe { matrixmultiply::sgemm(...) }     // pure-Rust SIMD カーネル
 ### 過学習と最適 step の見極め
 
 Tiny Shakespeare (~330k token) を `d_model=256` モデルで 10000 step 学習させた実例:
+
+![loss / ema / min / max の推移 (d_model=256, n_heads=8, d_ff=1024, n_layers=4, 10000 step)](docs/learning_rate.png)
+
+序盤 (~500 step) で急減、 中盤 (500〜3000 step) は穏やかに低下、 終盤 (4000 step 以降) は ema が
+1.0 を切り `~0.3` まで下がり続ける。 数値上の収束に対して、 **推論品質のピークは loss が 2〜3 前後の
+中盤帯 (step 2500〜3500)** にあり、 後段の loss 低下は過学習による記憶化に対応する。
 
 | step | loss | perplexity | 推論品質 |
 |------|------|-----------|---------|
