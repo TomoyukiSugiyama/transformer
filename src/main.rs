@@ -78,9 +78,9 @@ impl Config {
 fn main() {
     let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
-    training_and_inference(&corpus_text, &cfg);
+    // training_and_inference(&corpus_text, &cfg);
     // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
-    // inference_from_checkpoint(&cfg, "checkpoints/batch_size_16/step_001500.bin");
+    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_000500.bin");
 }
 
 #[allow(dead_code)]
@@ -236,8 +236,15 @@ fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
 }
 
 fn infer(model: &mut LanguageModel, prompts: &[&str]) {
+    let max_new_token = 100;
+    let top_k = 5;
+    let temperature = 1.0;
+    let repetition_penalty = 1.2;
     for prompt in prompts {
         println!("\n--- prompt: {:?} ---", prompt);
-        println!("\n{}", model.generate_top_k(prompt, 100, 5, 1.0));
+        println!(
+            "\n{}",
+            model.generate_top_k(prompt, max_new_token, top_k, temperature, repetition_penalty)
+        );
     }
 }

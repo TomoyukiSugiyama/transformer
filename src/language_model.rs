@@ -72,6 +72,7 @@ impl LanguageModel {
         }
     }
 
+    #[allow(dead_code)]
     fn forward_ids(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
@@ -79,6 +80,17 @@ impl LanguageModel {
         let x = self.pe.forward(&emb);
         let h = self.transformer.forward(&x, Some(&mask));
         self.output_head.forward(&h)
+    }
+
+    /// 生成用: 最後のトークン位置の logits だけ計算する。
+    /// 全位置を計算する `forward_ids` よりも `O(seq)` 倍速い。
+    fn forward_ids_last(&mut self, token_ids: &[usize]) -> Vec<f32> {
+        let seq = token_ids.len();
+        let mask = causal_mask(seq);
+        let emb = self.embedding.forward(token_ids);
+        let x = self.pe.forward(&emb);
+        let h = self.transformer.forward(&x, Some(&mask));
+        self.output_head.logits_last(&h[seq - 1])
     }
 
     pub fn forward_backward(&mut self, token_ids: &[usize], pad_id: usize) -> f32 {
@@ -124,26 +136,25 @@ impl LanguageModel {
     }
 
     #[allow(dead_code)]
-    pub fn generate(&mut self, prompt_text: &str, max_new_token: usize) -> String {
+    pub fn generate(
+        &mut self,
+        prompt_text: &str,
+        max_new_token: usize,
+        repetition_penalty: f32,
+    ) -> String {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
             let ctx = self.context_window(&ids);
-            let logits = self.forward_ids(ctx);
-            let last_logits = &logits[ctx.len() - 1];
-            let next_id = OutputHead::greedy(last_logits);
+            let mut logits = self.forward_ids_last(ctx);
+            apply_repetition_penalty(&mut logits, &ids, repetition_penalty);
+            let next_id = OutputHead::greedy(&logits);
             if next_id == eos_id {
                 break;
             }
             ids.push(next_id);
         }
-        let bos_id = self.tokenizer.bos_id();
-        let start = ids
-            .iter()
-            .position(|&id| id == bos_id)
-            .map(|p| p + 1)
-            .unwrap_or(0);
-        self.tokenizer.decode(&ids[start..])
+        self.detokenize(&ids)
     }
 
     pub fn generate_top_k(
@@ -152,19 +163,24 @@ impl LanguageModel {
         max_new_token: usize,
         k: usize,
         temprature: f32,
+        repetition_penalty: f32,
     ) -> String {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         for _ in 0..max_new_token {
             let ctx = self.context_window(&ids);
-            let logits = self.forward_ids(ctx);
-            let last_logits = &logits[ctx.len() - 1];
-            let next_id = OutputHead::top_k_sample(last_logits, k, temprature);
+            let mut logits = self.forward_ids_last(ctx);
+            apply_repetition_penalty(&mut logits, &ids, repetition_penalty);
+            let next_id = OutputHead::top_k_sample(&logits, k, temprature);
             if next_id == eos_id {
                 break;
             }
             ids.push(next_id);
         }
+        self.detokenize(&ids)
+    }
+
+    fn detokenize(&self, ids: &[usize]) -> String {
         let bos_id = self.tokenizer.bos_id();
         let start = ids
             .iter()
@@ -246,6 +262,23 @@ impl LanguageModel {
         opt.from_weight_map(&map.scoped("optimizer"))?;
 
         Ok((model, opt, step))
+    }
+}
+
+/// 既に生成済み（プロンプトを含む）の token に対して logits を割引（penalty>1）する。
+/// HuggingFace の repetition_penalty と同じ式（正は割り、負は掛ける）。
+/// `penalty == 1.0` のとき何もしない。
+fn apply_repetition_penalty(logits: &mut [f32], previous_ids: &[usize], penalty: f32) {
+    if penalty == 1.0 || previous_ids.is_empty() {
+        return;
+    }
+    use std::collections::HashSet;
+    let unique: HashSet<usize> = previous_ids.iter().copied().collect();
+    for id in unique {
+        if id < logits.len() {
+            let v = logits[id];
+            logits[id] = if v > 0.0 { v / penalty } else { v * penalty };
+        }
     }
 }
 

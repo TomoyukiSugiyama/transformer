@@ -167,6 +167,48 @@ CPU の全コアを活用するため、行列演算と損失計算を `rayon` �
 - `run_name` を分けることで、設定違いの実験を上書きせずに並走できる（`checkpoints/<run_name>/`）。
 - モデル構造（`d_model` 等）を変えると checkpoint 互換性が失われるため、構造変更時は fresh start（`training_and_inference`）を使う。
 
+## 今後の改善案
+
+### `Vec<Vec<f32>>` を flat `Vec<f32>` (Matrix struct) へ移行
+
+現在の行列表現は **jagged array** (`Vec<Vec<f32>>`) で、行ごとに別 heap 確保されている。
+これは以下の弱点がある:
+- キャッシュミスが多い（行ポインタを辿る間接参照）
+- SIMD 自動ベクトル化が抑制される
+- BLAS / matrixmultiply など外部行列演算ライブラリと相互運用不可
+
+flat 表現の例:
+```rust
+struct Matrix {
+    data: Vec<f32>,  // row-major, len = rows * cols
+    rows: usize,
+    cols: usize,
+}
+```
+
+期待される効果:
+- `matmul` / `transpose` がさらに 5-10× 高速化（特に `transpose` は列方向アクセスが連続化）
+- BLAS バックエンド（`matrixmultiply`, `ndarray-linalg` 等）への切り替えが容易
+- Apple Accelerate Framework, Intel MKL, OpenBLAS などをそのまま使えるようになる
+
+ただし全レイヤー（embedding, transformer, output_head, optimizer, checkpoint）の
+shape 仮定を書き換える必要があるため、段階的にやるなら以下の順序が望ましい:
+
+1. `Matrix` struct と基本演算 (`matmul`, `transpose`, `add`) を定義
+2. `utility.rs` の API を `Matrix` 受け渡しに変更
+3. 各レイヤーの内部表現を順に置き換え（`utility` の API は jagged 互換ラッパで両対応）
+4. 全置換完了後、外部行列演算ライブラリの導入を検討
+
+### 推論時のキャッシュ機構（KV cache）
+現在の `generate` は token 1 つ生成するたびに過去のトークンを含む全 context を再計算している。
+KV cache（Q/K/V の中間結果を保持）を導入すれば 1 token 生成あたり `O(n)` → `O(1)` に近づく。
+`max_len=128` 以上の生成で大きく効く。
+
+### Repetition penalty 以外の生成制御
+- top-p (nucleus) sampling
+- 最小生成トークン数 (`min_new_tokens`)
+- bad words / banned ngrams フィルタ
+
 ## ログの読み方
 
 ```
