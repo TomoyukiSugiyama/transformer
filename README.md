@@ -53,7 +53,7 @@ grep -E '^(step,|[0-9]+,)' train.log > train.csv
 ```
 src/
 ├── main.rs                    # エントリ・学習ループ
-├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）
+├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate
 ├── transformer.rs             # Transformer (block の積み重ね)
 ├── transformer_block.rs       # 1 ブロック (MHA + FFN + LayerNorm)
 ├── multi_head_attention.rs    # マルチヘッドアテンション
@@ -67,7 +67,7 @@ src/
 ├── cross_entropy_loss.rs
 ├── bpe_tokenizer.rs           # BPE トークナイザ
 ├── checkpoint.rs              # 重み・状態の保存/読込
-└── utility.rs                 # 行列演算ユーティリティ（rayon で並列化）
+└── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
 
 corpus/
 └── train.txt                  # 学習データ（全行を連結し、ランダム窓でサンプリング）
@@ -104,37 +104,54 @@ fn main() {
 
 ## 並列化と性能
 
-CPU の全コアを活用するため、行列演算と損失計算を `rayon` で並列化している。
+行列演算は `crate::matrix::Matrix` に集約されている。
+内部表現は **行優先の flat `Vec<f32>`**（jagged な `Vec<Vec<f32>>` ではない）。
+重い演算は `rayon` で並列化されており、CPU の全コアを活用する。
+
+### `Matrix` の主な API
+
+- 構築: `zeros`, `from_jagged`, `from_flat`
+- 演算: `matmul`, `transpose`, `add_in_place`, `add_row_bias_in_place`,
+  `sum_rows_into_cols`, `map`, `elementwise_with`, `softmax_rows_in_place`
+- MHA 用: `split_columns(n)` / `concat_columns(&[Matrix])`
 
 ### 並列化の対象
 
 | ファイル / 関数 | 並列化対象 | 並列粒度 |
 |----------------|----------|---------|
-| `utility::matmul` | 出力行 `i` ループ | 行ごと |
-| `utility::softmax_rows` | 行ごとの softmax | 行ごと |
+| `matrix::matmul` | 出力行 `i` ループ (`par_chunks_mut`) | 行ごと |
+| `matrix::transpose` | 出力行 (`par_chunks_mut`) | 行ごと |
+| `matrix::add_in_place` | 要素 (`par_iter_mut`) | 要素ごと |
+| `matrix::softmax_rows_in_place` | 行ごとの softmax | 行ごと |
+| `output_head::logits_last` | vocab 次元の射影 | 出力次元 |
 | `cross_entropy_loss::forward_sequence` | 各 token の softmax+loss+grad | token ごと |
 
-### matmul / softmax を経由する主な処理
+`matmul` は内側ループ順序を `i-k-j` にすることでキャッシュ効率と SIMD 自動ベクトル化を引き出している。
+flat 表現により行ごとに連続メモリを扱えるため、`Vec<Vec<f32>>` 版より間接参照ゼロ。
 
-- `multi_head_attention`: Q/K/V/O 射影、scaled-dot-product attention
-- `feed_forward_network`: forward / backward すべて
-- `output_head`: forward / backward すべて
+### Matrix を経由する主な処理
 
-`Vec<Vec<f32>>` の jagged 表現のまま、`matmul` の内側ループ順序を `i-k-j` にすることで
-キャッシュ効率と SIMD 自動ベクトル化を引き出している。
+- `multi_head_attention`: Q/K/V/O 射影、scaled-dot-product attention、head 分割・結合
+- `feed_forward_network`: forward / backward すべて、bias 加算、GELU、勾配集計
+- `output_head`: forward / backward すべて、`logits_last` （単一トークン推論最適化）
 
-### 並列化されていない箇所
+### Matrix を経由していない箇所（軽量で並列化非対象）
 
-- `embedding`: token id ベースの lookup なので並列化のメリットが薄い
-- `layer_normalization`: 行ごとの統計量計算で軽量
-- `transpose`, `add_matrix_in_place`: 線形時間で軽量
+- `embedding`: token id ベースの lookup
+- `layer_normalization`: 行ごとの統計量計算（d_model 方向のみで小規模）
+- `sinusoidal_pe`: 加算のみで軽量
+
+### AdamW との橋渡し
+
+`AdamW::step_matrix_flat(&mut self, &str, &mut Matrix, &Matrix)` が `Matrix` を直接受け取る。
+内部の `AdamWParam.data` も `Vec<f32>` (flat) なので、 jagged ↔ flat の **flatten 変換コストはゼロ**。
 
 ### 効果（M1 Max / 10 コア環境での観察）
 
 `d_model=128, max_len=64, batch_size=16` での 1 step あたりの所要時間がおよそ
 **1 桁短く** なった（並列化前は MHA 以外がシリアル実行だったため）。
-この高速化を前提に、`d_model=256, max_len=128` といった構成変更を
-現実的な時間で試せる。
+この高速化を前提に `d_model=256, max_len=128, d_ff=1024` といった大きめの構成も
+数時間で 10000 step 学習できる。
 
 ## チューニングのコツ
 
@@ -161,7 +178,9 @@ CPU の全コアを活用するため、行列演算と損失計算を `rayon` �
 
 ### 推論時の繰り返し対策
 - greedy はすぐに同じ語句に落ち込みやすいので、**top-k サンプリング + 適度な temperature**（例: `top_k=5, temperature=1.0`）の方が自然な文章になる。
-- それでも `my lord, my lord, ...` のような繰り返しが出る場合は repetition penalty の導入を検討する。
+- `my lord, my lord, ...` のような繰り返しは **repetition penalty** で軽減する。
+  `LanguageModel::generate*` は `repetition_penalty` 引数を受け取り、 `1.1〜1.3` 程度が無難。
+  HuggingFace と同じ式（正は割り算、負は掛け算）で過去に出現した token を抑制する。
 
 ### checkpoint 運用
 - `run_name` を分けることで、設定違いの実験を上書きせずに並走できる（`checkpoints/<run_name>/`）。
@@ -169,45 +188,30 @@ CPU の全コアを活用するため、行列演算と損失計算を `rayon` �
 
 ## 今後の改善案
 
-### `Vec<Vec<f32>>` を flat `Vec<f32>` (Matrix struct) へ移行
+### 外部 BLAS バックエンドの活用
+flat 表現への移行は完了しているので、次は `matrix::Matrix` 内部の `matmul` を
+外部ライブラリに差し替えるだけで済む:
+- `matrixmultiply` クレート（pure Rust、SIMD 最適化）
+- `ndarray` + `ndarray-linalg`（OpenBLAS / Intel MKL バインディング）
+- Apple Accelerate Framework（macOS の標準 BLAS、`accelerate-src` 経由）
 
-現在の行列表現は **jagged array** (`Vec<Vec<f32>>`) で、行ごとに別 heap 確保されている。
-これは以下の弱点がある:
-- キャッシュミスが多い（行ポインタを辿る間接参照）
-- SIMD 自動ベクトル化が抑制される
-- BLAS / matrixmultiply など外部行列演算ライブラリと相互運用不可
-
-flat 表現の例:
-```rust
-struct Matrix {
-    data: Vec<f32>,  // row-major, len = rows * cols
-    rows: usize,
-    cols: usize,
-}
-```
-
-期待される効果:
-- `matmul` / `transpose` がさらに 5-10× 高速化（特に `transpose` は列方向アクセスが連続化）
-- BLAS バックエンド（`matrixmultiply`, `ndarray-linalg` 等）への切り替えが容易
-- Apple Accelerate Framework, Intel MKL, OpenBLAS などをそのまま使えるようになる
-
-ただし全レイヤー（embedding, transformer, output_head, optimizer, checkpoint）の
-shape 仮定を書き換える必要があるため、段階的にやるなら以下の順序が望ましい:
-
-1. `Matrix` struct と基本演算 (`matmul`, `transpose`, `add`) を定義
-2. `utility.rs` の API を `Matrix` 受け渡しに変更
-3. 各レイヤーの内部表現を順に置き換え（`utility` の API は jagged 互換ラッパで両対応）
-4. 全置換完了後、外部行列演算ライブラリの導入を検討
+`Matrix::data()` で `&[f32]` をそのまま渡せるため、変換オーバーヘッドなしで導入できる。
 
 ### 推論時のキャッシュ機構（KV cache）
-現在の `generate` は token 1 つ生成するたびに過去のトークンを含む全 context を再計算している。
-KV cache（Q/K/V の中間結果を保持）を導入すれば 1 token 生成あたり `O(n)` → `O(1)` に近づく。
+現在の `generate` は token 1 つ生成するたびに過去のトークンを含む全 context を
+attention で再計算している。KV cache（Q/K/V の中間結果を保持）を導入すれば
+1 token 生成あたりの計算量が `O(n)` → `O(1)` 近くまで下がる。
 `max_len=128` 以上の生成で大きく効く。
 
-### Repetition penalty 以外の生成制御
+### 生成制御の追加
 - top-p (nucleus) sampling
 - 最小生成トークン数 (`min_new_tokens`)
 - bad words / banned ngrams フィルタ
+
+### `layer_normalization`, `embedding` 等の統一
+これらは現在 `Vec<Vec<f32>>` をやりとりしているが、内部の API 境界で `Matrix::from_jagged`/
+`to_jagged` 変換が走っている。すべてを `Matrix` で統一すれば変換コストが消え、コードも整う。
+ただし計算ボトルネックではないので優先度は低い。
 
 ## ログの読み方
 

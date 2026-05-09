@@ -5,12 +5,12 @@ mod embedding;
 mod feed_forward_network;
 mod language_model;
 mod layer_normalization;
+mod matrix;
 mod multi_head_attention;
 mod output_head;
 mod sinusoidal_pe;
 mod transformer;
 mod transformer_block;
-mod utility;
 
 mod checkpoint;
 mod lr_scheduler;
@@ -80,7 +80,7 @@ fn main() {
     let cfg = Config::tiny_shakespeare();
     // training_and_inference(&corpus_text, &cfg);
     // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
-    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_000500.bin");
+    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_002000.bin");
 }
 
 #[allow(dead_code)]

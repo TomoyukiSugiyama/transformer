@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::checkpoint::{Checkpointable, WeightMap};
+use crate::matrix::Matrix;
 
 pub struct AdamWParam {
     data: Vec<f32>, // パラメータ本体(W1, W2, b など)
@@ -116,6 +117,36 @@ impl AdamW {
         let mut param_mat = vec![param.clone()];
         self.step_matrix(key, &mut param_mat, &[grad.to_vec()]);
         *param = param_mat.remove(0);
+    }
+
+    /// flat な `Matrix` を直接受け取る版。`step_matrix` のような jagged ↔ flat の変換が
+    /// 不要なため、`Matrix` を内部表現に持つレイヤー（移行後）から使う。
+    pub fn step_matrix_flat(&mut self, param_id: &str, w: &mut Matrix, grad: &Matrix) {
+        assert_eq!(
+            w.shape(),
+            grad.shape(),
+            "step_matrix_flat shape mismatch: {:?} vs {:?}",
+            w.shape(),
+            grad.shape()
+        );
+        let scale = self.grad_scale;
+        let scaled_grad: Vec<f32> = grad.data().iter().map(|&g| g * scale).collect();
+
+        let param = self
+            .moments
+            .entry(param_id.to_string())
+            .or_insert_with(|| AdamWParam::new(w.data().to_vec()));
+        param.step(
+            &scaled_grad,
+            self.step_count,
+            self.lr,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.wd,
+        );
+
+        w.data_mut().copy_from_slice(&param.data);
     }
 }
 

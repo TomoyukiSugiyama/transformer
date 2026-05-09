@@ -8,11 +8,12 @@ use rand::rng;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
+use crate::matrix::Matrix;
 
 pub struct OutputHead {
-    w: Vec<Vec<f32>>,
-    grad_w: Vec<Vec<f32>>,
-    cache_hidden: Vec<Vec<f32>>,
+    w: Matrix,            // (d_model, vocab_size)
+    grad_w: Matrix,       // (d_model, vocab_size)
+    cache_hidden: Matrix, // (seq_len, d_model)
     vocab_size: usize,
     d_model: usize,
 }
@@ -21,17 +22,14 @@ impl OutputHead {
     pub fn new(d_model: usize, vocab_size: usize) -> Self {
         let mut rng = rng();
         let scale = (1.0 / d_model as f32).sqrt();
-        let w = (0..d_model)
-            .map(|_| {
-                (0..vocab_size)
-                    .map(|_| rng.random_range(-scale..scale))
-                    .collect()
-            })
-            .collect();
+        let mut w = Matrix::zeros(d_model, vocab_size);
+        for v in w.data_mut() {
+            *v = rng.random_range(-scale..scale);
+        }
         Self {
             w,
-            grad_w: vec![vec![0.0; vocab_size]; d_model],
-            cache_hidden: vec![],
+            grad_w: Matrix::zeros(d_model, vocab_size),
+            cache_hidden: Matrix::zeros(0, 0),
             vocab_size,
             d_model,
         }
@@ -40,13 +38,14 @@ impl OutputHead {
     #[allow(dead_code)]
     pub fn logits_last(&self, last_hidden: &[f32]) -> Vec<f32> {
         use rayon::prelude::*;
-        (0..self.vocab_size)
+        let cols = self.w.cols();
+        (0..cols)
             .into_par_iter()
             .map(|j| {
                 last_hidden
                     .iter()
                     .enumerate()
-                    .map(|(i, &x)| x * self.w[i][j])
+                    .map(|(i, &x)| x * self.w.get(i, j))
                     .sum::<f32>()
             })
             .collect()
@@ -91,33 +90,30 @@ impl OutputHead {
 
     /// (seq_len, d_model) → (seq_len, vocab_size)
     pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        use crate::utility::matmul;
-        self.cache_hidden = hidden.to_vec();
+        self.cache_hidden = Matrix::from_jagged(hidden);
         // logits = hidden @ W   shape: (seq_len, vocab_size)
-        matmul(hidden, &self.w)
+        self.cache_hidden.matmul(&self.w).to_jagged()
     }
 
     /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
     /// grad_w を内部に累積する（apply_gradients で使用、バッチ末に zero_grad で初期化）
     pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        use crate::utility::{add_matrix_in_place, matmul, transpose};
+        let dl_dlogits_m = Matrix::from_jagged(dl_dlogits);
 
         // grad_w += cache_hidden^T @ dl_dlogits   shape: (d_model, vocab_size)
-        let g_w = matmul(&transpose(&self.cache_hidden), dl_dlogits);
-        add_matrix_in_place(&mut self.grad_w, &g_w);
+        let g_w = self.cache_hidden.transpose().matmul(&dl_dlogits_m);
+        self.grad_w.add_in_place(&g_w);
 
         // dl_dhidden = dl_dlogits @ W^T   shape: (seq_len, d_model)
-        matmul(dl_dlogits, &transpose(&self.w))
+        dl_dlogits_m.matmul(&self.w.transpose()).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {
-        for row in &mut self.grad_w {
-            row.fill(0.0);
-        }
+        self.grad_w.data_mut().fill(0.0);
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
-        opt.step_matrix(&format!("{prefix}.w"), &mut self.w, &self.grad_w);
+        opt.step_matrix_flat(&format!("{prefix}.w"), &mut self.w, &self.grad_w);
     }
 }
 
@@ -126,7 +122,7 @@ impl Checkpointable for OutputHead {
         let mut map = WeightMap::new();
         map.insert_scalar("vocab_size", self.vocab_size as u64);
         map.insert_scalar("d_model", self.d_model as u64);
-        map.insert_matrix("w", self.w.clone());
+        map.insert_matrix("w", self.w.to_jagged());
         map
     }
 
@@ -139,7 +135,7 @@ impl Checkpointable for OutputHead {
                 "Output head config mismatch",
             ));
         }
-        self.w = map.get_matrix("w")?.clone();
+        self.w = Matrix::from_jagged(map.get_matrix("w")?);
         Ok(())
     }
 }

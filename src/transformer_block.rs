@@ -31,7 +31,7 @@ impl TransformerBlock {
     pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
         self.cache_x = x.to_vec();
         let norm1 = self.norm1.forward(x);
-        let (attn_out, _) = self.mha.forward(&norm1, mask);
+        let attn_out = self.mha.forward(&norm1, mask);
         let x2 = residual_add(x, &attn_out);
 
         self.cache_x2 = x2.clone();
