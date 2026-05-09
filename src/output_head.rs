@@ -39,7 +39,9 @@ impl OutputHead {
 
     #[allow(dead_code)]
     pub fn logits_last(&self, last_hidden: &[f32]) -> Vec<f32> {
+        use rayon::prelude::*;
         (0..self.vocab_size)
+            .into_par_iter()
             .map(|j| {
                 last_hidden
                     .iter()

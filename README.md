@@ -136,6 +136,37 @@ CPU の全コアを活用するため、行列演算と損失計算を `rayon` �
 この高速化を前提に、`d_model=256, max_len=128` といった構成変更を
 現実的な時間で試せる。
 
+## チューニングのコツ
+
+実装と実験を通じて得られた知見のまとめ。
+
+### 学習データの整形
+- **行ごと（短文）に切らず、コーパス全体を 1 つの token 列に連結**してランダム窓でサンプリングする方が、対話・改行・句読点などの構造を学習できる。
+- 行ごとに `<EOS>` を付けると EOS バイアスが発生し、推論時に 1 トークンで打ち切られやすくなる。連結方式では EOS は不要（`max_new_tokens` で停止）。
+
+### 学習率
+- `lr_max ≒ 3e-4`、`lr_min ≒ 1e-5`、`warmup_steps ≒ 200` が小規模 Transformer の典型値。
+- `lr_min` を `0` 付近にすると終盤が完全に止まるため、**`1e-5` 程度のフロアを残す**。
+- checkpoint から end_step を伸ばして再開すると、scheduler の進捗がリセットされて lr が上振れする（**warm restart 効果**）。停滞局所解からの脱出に使える。
+
+### バッチとミニバッチ勾配
+- `batch_size` 個の `forward_backward` で勾配を累積し、まとめて 1 回 `apply_gradients` する。
+- AdamW の `step_count` も 1 step に 1 回しか進めない（パラメータごとに進めない）。
+- 累積勾配は `set_grad_scale(batch_size)` で平均化扱いにし、`apply_gradients` 後に `zero_grad` でリセットする。
+
+### モデル構造の比率
+- `d_ff = 4 × d_model` が標準（GPT-2、nanoGPT 等）。FFN は知識を蓄える主役なので `d_model` を増やすときは `d_ff` も比例して増やす。
+- `d_head = d_model / n_heads = 32〜64` が扱いやすい。
+- `max_len` を上げると attention は `O(n²)` で重くなる。学習対象（対話 1 ターン: 〜100 token、シーン: 〜500 token）に合わせて選ぶ。
+
+### 推論時の繰り返し対策
+- greedy はすぐに同じ語句に落ち込みやすいので、**top-k サンプリング + 適度な temperature**（例: `top_k=5, temperature=1.0`）の方が自然な文章になる。
+- それでも `my lord, my lord, ...` のような繰り返しが出る場合は repetition penalty の導入を検討する。
+
+### checkpoint 運用
+- `run_name` を分けることで、設定違いの実験を上書きせずに並走できる（`checkpoints/<run_name>/`）。
+- モデル構造（`d_model` 等）を変えると checkpoint 互換性が失われるため、構造変更時は fresh start（`training_and_inference`）を使う。
+
 ## ログの読み方
 
 ```

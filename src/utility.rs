@@ -18,13 +18,14 @@ pub fn matmul(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
 
 /// 行列を転置: (m, n) → (n, m)
 pub fn transpose(a: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    use rayon::prelude::*;
     let (m, n) = (a.len(), a[0].len());
-    let mut out = vec![vec![0.0f32; m]; n];
-    for i in 0..m {
-        for j in 0..n {
-            out[j][i] = a[i][j];
+    let mut out: Vec<Vec<f32>> = (0..n).map(|_| vec![0.0f32; m]).collect();
+    out.par_iter_mut().enumerate().for_each(|(j, out_row)| {
+        for i in 0..m {
+            out_row[i] = a[i][j];
         }
-    }
+    });
     out
 }
 
