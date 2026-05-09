@@ -37,6 +37,7 @@ impl OutputHead {
         }
     }
 
+    #[allow(dead_code)]
     pub fn logits_last(&self, last_hidden: &[f32]) -> Vec<f32> {
         (0..self.vocab_size)
             .map(|j| {
@@ -88,35 +89,23 @@ impl OutputHead {
 
     /// (seq_len, d_model) → (seq_len, vocab_size)
     pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_hidden = hidden.to_vec().clone();
-        hidden
-            .iter()
-            .map(|row: &Vec<f32>| self.logits_last(row))
-            .collect()
+        use crate::utility::matmul;
+        self.cache_hidden = hidden.to_vec();
+        // logits = hidden @ W   shape: (seq_len, vocab_size)
+        matmul(hidden, &self.w)
     }
 
     /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
     /// grad_w を内部に累積する（apply_gradients で使用、バッチ末に zero_grad で初期化）
     pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let seq_len = dl_dlogits.len();
-        let mut dl_dhidden = vec![vec![0.0f32; self.d_model]; seq_len];
+        use crate::utility::{add_matrix_in_place, matmul, transpose};
 
-        for t in 0..seq_len {
-            // dL/dW += cache_hidden[t]^T ⊗ dl_dlogits[t]
-            for i in 0..self.d_model {
-                for j in 0..self.vocab_size {
-                    self.grad_w[i][j] += self.cache_hidden[t][i] * dl_dlogits[t][j];
-                }
-            }
-            // dL/d_hidden[t] = W × dl_dlogits[t]
-            for i in 0..self.d_model {
-                dl_dhidden[t][i] = (0..self.vocab_size)
-                    .map(|j| self.w[i][j] * dl_dlogits[t][j])
-                    .sum();
-            }
-        }
+        // grad_w += cache_hidden^T @ dl_dlogits   shape: (d_model, vocab_size)
+        let g_w = matmul(&transpose(&self.cache_hidden), dl_dlogits);
+        add_matrix_in_place(&mut self.grad_w, &g_w);
 
-        dl_dhidden
+        // dl_dhidden = dl_dlogits @ W^T   shape: (seq_len, d_model)
+        matmul(dl_dlogits, &transpose(&self.w))
     }
 
     pub fn zero_grad(&mut self) {

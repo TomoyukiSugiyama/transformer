@@ -1,14 +1,18 @@
 /// (m, k) × (k, n) → (m, n)
 pub fn matmul(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let (m, k, n) = (a.len(), b.len(), b[0].len());
-    let mut out = vec![vec![0.0f32; n]; m];
-    for i in 0..m {
-        for j in 0..n {
-            for l in 0..k {
-                out[i][j] += a[i][l] * b[l][j];
+    use rayon::prelude::*;
+    let (_m, k, n) = (a.len(), b.len(), b[0].len());
+    let mut out: Vec<Vec<f32>> = a.iter().map(|_| vec![0.0f32; n]).collect();
+    out.par_iter_mut().enumerate().for_each(|(i, out_row)| {
+        let a_row = &a[i];
+        for l in 0..k {
+            let aik = a_row[l];
+            let b_row = &b[l];
+            for j in 0..n {
+                out_row[j] += aik * b_row[j];
             }
         }
-    }
+    });
     out
 }
 
@@ -26,11 +30,12 @@ pub fn transpose(a: &[Vec<f32>]) -> Vec<Vec<f32>> {
 
 /// Softmax（行ごと、数値安定版）
 pub fn softmax_rows(a: &mut Vec<Vec<f32>>) {
-    for row in a.iter_mut() {
+    use rayon::prelude::*;
+    a.par_iter_mut().for_each(|row| {
         let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let sum: f32 = row.iter().map(|x| (x - max).exp()).sum();
         row.iter_mut().for_each(|x| *x = ((*x) - max).exp() / sum);
-    }
+    });
 }
 
 /// 線形変換: (seq_len, d_in) × W(d_in, d_out) → (seq_len, d_out)

@@ -53,7 +53,7 @@ impl Config {
         let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
 
         Self {
-            run_name: "batch_size_16",
+            run_name: "matmul_tuning_with_rayon",
             d_model: 128,
             n_heads: 4,
             d_ff: 512,
@@ -61,9 +61,9 @@ impl Config {
             max_len: 64,
             vocab_size: 4000,
             lr_max: 3e-4,
-            lr_min: 1e-6,
+            lr_min: 1e-5,
             warmup_steps: 200,
-            end_step: 2500,
+            end_step: 5000,
             save_every: 500,
             log_every: 20,
             batch_size: 16,
@@ -79,15 +79,13 @@ fn main() {
     let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
     // training_and_inference(&corpus_text, &cfg);
-    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/with_lr_sched/step_001500.bin");
-    inference_from_checkpoint(&cfg, "checkpoints/batch_size_16/step_001000.bin");
+    training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
+    // inference_from_checkpoint(&cfg, "checkpoints/batch_size_16/step_001500.bin");
 }
 
 #[allow(dead_code)]
 fn inference_from_checkpoint(cfg: &Config, path: &str) {
     let mut model = LanguageModel::load_inference_checkpoint(path).unwrap();
-    // let prompt = "To be or not to be";
-    let prompt = "I have seen";
     infer(&mut model, &cfg.prompts);
 }
 

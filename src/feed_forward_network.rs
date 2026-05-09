@@ -70,103 +70,88 @@ impl FeedForwardNetwork {
         0.5 * (1.0 + tanh_val) + 0.5 * x * sech2 * c * (1.0 + 3.0 * 0.044715 * x.powi(2))
     }
 
-    fn forward_one(&mut self, x: &[f32]) -> Vec<f32> {
-        // Layer 1: (d_model,) × W1(d_model, d_ff) + b1 → (d_ff,)
-        // z1 = x @ W1 + b1  (GELU前の値をキャッシュ)
-        let z1: Vec<f32> = (0..self.d_ff)
-            .map(|j| {
-                self.b1[j]
-                    + x.iter()
-                        .enumerate()
-                        .map(|(i, &xi)| xi * self.w1[i][j])
-                        .sum::<f32>()
-            })
-            .collect();
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        use crate::utility::matmul;
+
+        self.cache_x = x.to_vec();
+
+        // Layer 1: z1 = x @ W1 + b1   shape: (seq_len, d_ff)
+        let mut z1 = matmul(x, &self.w1);
+        for row in z1.iter_mut() {
+            for (j, b) in self.b1.iter().enumerate() {
+                row[j] += *b;
+            }
+        }
 
         // a = GELU(z1)
-        let a: Vec<f32> = z1.iter().map(|&v| Self::gelu(v)).collect();
-
-        // Layer 2: (d_ff,) × W2(d_ff, d_model) + b2 → (d_model,)
-        // z2 = a @ W2 + b2
-        let z2: Vec<f32> = (0..self.d_model)
-            .map(|j| {
-                self.b2[j]
-                    + a.iter()
-                        .enumerate()
-                        .map(|(i, &ai)| ai * self.w2[i][j])
-                        .sum::<f32>()
-            })
+        let a: Vec<Vec<f32>> = z1
+            .iter()
+            .map(|row| row.iter().map(|&v| Self::gelu(v)).collect())
             .collect();
 
-        self.cache_z1.push(z1);
-        self.cache_a.push(a);
+        // Layer 2: z2 = a @ W2 + b2   shape: (seq_len, d_model)
+        let mut z2 = matmul(&a, &self.w2);
+        for row in z2.iter_mut() {
+            for (j, b) in self.b2.iter().enumerate() {
+                row[j] += *b;
+            }
+        }
+
+        self.cache_z1 = z1;
+        self.cache_a = a;
 
         z2
     }
 
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_x = x.to_vec();
-        self.cache_z1 = vec![];
-        self.cache_a = vec![];
-
-        x.iter().map(|row| self.forward_one(row)).collect()
-    }
-
     pub fn backward(&mut self, dl_dz2: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let seq_len = dl_dz2.len();
+        use crate::utility::{add_matrix_in_place, matmul, transpose};
 
-        let mut dl_dx = vec![vec![0.0; self.d_model]; seq_len];
+        // --- W2 の勾配 ---
+        // grad_w2 += cache_a^T @ dl_dz2   shape: (d_ff, d_model)
+        let g_w2 = matmul(&transpose(&self.cache_a), dl_dz2);
+        add_matrix_in_place(&mut self.grad_w2, &g_w2);
 
-        for t in 0..seq_len {
-            // --- W2, b2 の勾配 ---
-            // dL/dW2 += a[t]^T ⊗ dl_dz2[t]
-            for i in 0..self.d_ff {
-                for j in 0..self.d_model {
-                    self.grad_w2[i][j] += self.cache_a[t][i] * dl_dz2[t][j];
-                }
-            }
-
-            // dL/db2 += dl_dz2[t]
-            for j in 0..self.d_model {
-                self.grad_b2[j] += dl_dz2[t][j];
-            }
-
-            // --- GELU 手前まで逆伝播 ---
-            // dL/da = dl_dz2[t] @ W2^T   shape: (d_ff,)
-            let dl_da: Vec<f32> = (0..self.d_ff)
-                .map(|i| {
-                    (0..self.d_model)
-                        .map(|j| dl_dz2[t][j] * self.w2[i][j])
-                        .sum()
-                })
-                .collect();
-
-            // dL/dz1 = dL/da ⊙ GELU'(z1)   shape: (d_ff,)
-            let dl_dz1: Vec<f32> = (0..self.d_ff)
-                .map(|i| dl_da[i] * Self::gelu_grad(self.cache_z1[t][i]))
-                .collect();
-
-            // --- W1, b1 の勾配 ---
-            // dL/dW1 += x[t]^T ⊗ dl_dz1
-            for i in 0..self.d_model {
-                for j in 0..self.d_ff {
-                    self.grad_w1[i][j] += self.cache_x[t][i] * dl_dz1[j];
-                }
-            }
-
-            // dL/db1 += dl_dz1
-            for j in 0..self.d_ff {
-                self.grad_b1[j] += dl_dz1[j];
-            }
-
-            // --- 上流への勾配 ---
-            // dL/dx = dl_dz1 @ W1^T   shape: (d_model,)
-            for i in 0..self.d_model {
-                dl_dx[t][i] = (0..self.d_ff).map(|j| dl_dz1[j] * self.w1[i][j]).sum();
+        // --- b2 の勾配 ---
+        // grad_b2 += Σ_t dl_dz2[t]
+        for row in dl_dz2.iter() {
+            for (j, v) in row.iter().enumerate() {
+                self.grad_b2[j] += *v;
             }
         }
 
-        dl_dx
+        // --- GELU 手前まで逆伝播 ---
+        // dL/da = dl_dz2 @ W2^T   shape: (seq_len, d_ff)
+        let dl_da = matmul(dl_dz2, &transpose(&self.w2));
+
+        // dL/dz1 = dL/da ⊙ GELU'(z1)   shape: (seq_len, d_ff)
+        let dl_dz1: Vec<Vec<f32>> = dl_da
+            .iter()
+            .zip(self.cache_z1.iter())
+            .map(|(da_row, z1_row)| {
+                da_row
+                    .iter()
+                    .zip(z1_row.iter())
+                    .map(|(&da, &z)| da * Self::gelu_grad(z))
+                    .collect()
+            })
+            .collect();
+
+        // --- W1 の勾配 ---
+        // grad_w1 += cache_x^T @ dl_dz1   shape: (d_model, d_ff)
+        let g_w1 = matmul(&transpose(&self.cache_x), &dl_dz1);
+        add_matrix_in_place(&mut self.grad_w1, &g_w1);
+
+        // --- b1 の勾配 ---
+        // grad_b1 += Σ_t dl_dz1[t]
+        for row in dl_dz1.iter() {
+            for (j, v) in row.iter().enumerate() {
+                self.grad_b1[j] += *v;
+            }
+        }
+
+        // --- 上流への勾配 ---
+        // dl_dx = dl_dz1 @ W1^T   shape: (seq_len, d_model)
+        matmul(&dl_dz1, &transpose(&self.w1))
     }
 
     pub fn zero_grad(&mut self) {
