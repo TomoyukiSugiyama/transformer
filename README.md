@@ -216,12 +216,12 @@ attention で再計算している。KV cache（Q/K/V の中間結果を保持�
 ## ログの読み方
 
 ```
-# run_name=with_lr_sched
-# d_model=128, n_heads=4, ...
-# lr_max=0.0003, lr_min=0.000001, warmup_steps=200, ...
-step,loss,ema,min,max,lr
-20,6.7432,7.6912,6.7432,8.4294,3.000e-5
-40,6.1839,6.7892,6.0621,6.7436,6.000e-5
+# run_name=phase2_d256_ff1024_max128
+# d_model=256, n_heads=8, ...
+# lr_max=0.0003, lr_min=0.00001, warmup_steps=200, ...
+step,loss,ema,min,max,lr,ms_per_step,elapsed_s
+20,6.7432,7.6912,6.7432,8.4294,3.000e-5,425.3,8.5
+40,6.1839,6.7892,6.0621,6.7436,6.000e-5,418.7,16.9
 ...
 ```
 
@@ -232,3 +232,5 @@ step,loss,ema,min,max,lr
 | `ema` | 指数移動平均 loss (α=0.05) |
 | `min` / `max` | 直近 `log_every` ステップ内の最小/最大 loss |
 | `lr` | 当該ステップでの学習率 |
+| `ms_per_step` | 直近 `log_every` ステップでの 1 ステップあたり平均所要時間 (ミリ秒) |
+| `elapsed_s` | 学習開始からの累積経過時間 (秒) |

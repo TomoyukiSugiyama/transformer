@@ -16,6 +16,7 @@ mod checkpoint;
 mod lr_scheduler;
 
 use std::fs;
+use std::time::Instant;
 
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
@@ -80,7 +81,7 @@ fn main() {
     let cfg = Config::tiny_shakespeare();
     // training_and_inference(&corpus_text, &cfg);
     // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
-    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_002000.bin");
+    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_002500.bin");
 }
 
 #[allow(dead_code)]
@@ -135,7 +136,10 @@ fn run_training_loop(
         chunk_len,
         max_offset
     );
-    println!("step,loss,ema,min,max,lr");
+    println!("step,loss,ema,min,max,lr,ms_per_step,elapsed_s");
+
+    let train_start = Instant::now();
+    let mut window_start = Instant::now();
 
     for step in start_step..=cfg.end_step {
         let lr = lr_scheduler.get_lr(step);
@@ -167,17 +171,24 @@ fn run_training_loop(
             window_max = window_max.max(avg_loss);
         }
         if step % cfg.log_every == 0 {
+            let window_elapsed = window_start.elapsed();
+            let ms_per_step =
+                window_elapsed.as_secs_f64() * 1000.0 / cfg.log_every as f64;
+            let elapsed_s = train_start.elapsed().as_secs_f64();
             println!(
-                "{},{:.6},{:.6},{:.6},{:.6},{:.3e}",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.3e},{:.1},{:.1}",
                 step,
                 avg_loss,
                 ema_loss.unwrap(),
                 window_min,
                 window_max,
                 lr,
+                ms_per_step,
+                elapsed_s,
             );
             window_min = f32::INFINITY;
             window_max = f32::NEG_INFINITY;
+            window_start = Instant::now();
         }
         if step % cfg.save_every == 0 {
             let path = format!("{ckpt_dir}/step_{step:06}.bin");
