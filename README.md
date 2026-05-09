@@ -7,6 +7,7 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 
 - Rust (edition 2024)
 - `rand = "0.10.1"`
+- `rayon = "1.10"` （行列演算・損失計算の並列化）
 
 ## 実行
 
@@ -64,12 +65,12 @@ src/
 ├── adam_w.rs                  # AdamW オプティマイザ
 ├── lr_scheduler.rs            # warmup + cosine スケジューラ
 ├── cross_entropy_loss.rs
-├── bpe_tokenizeer.rs          # BPE トークナイザ
+├── bpe_tokenizer.rs           # BPE トークナイザ
 ├── checkpoint.rs              # 重み・状態の保存/読込
-└── utility.rs                 # 行列演算ユーティリティ
+└── utility.rs                 # 行列演算ユーティリティ（rayon で並列化）
 
 corpus/
-└── train.txt                  # 学習データ（1 行 1 サンプル、# でコメント）
+└── train.txt                  # 学習データ（全行を連結し、ランダム窓でサンプリング）
 
 checkpoints/<run_name>/
 ├── step_NNNNNN.bin            # 学習途中の checkpoint
@@ -83,20 +84,57 @@ checkpoints/<run_name>/
 
 ```rust
 fn main() {
-    let corpus_strings = load_corpus("corpus/train.txt");
-    let corpus: Vec<&str> = corpus_strings.iter().map(String::as_str).collect();
+    let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
 
     // 新規学習
-    training_and_inference(&corpus, &cfg);
+    training_and_inference(&corpus_text, &cfg);
 
-    // チェックポイントから再開
-    // training_from_checkpoint(&corpus, &cfg, "checkpoints/with_lr_sched/latest.bin");
+    // チェックポイントから再開（同じモデル構造の checkpoint のみ）
+    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/<run_name>/latest.bin");
 
     // チェックポイントを読み込んで推論のみ
-    // inference_from_checkpoint("checkpoints/with_lr_sched/inference.bin");
+    // inference_from_checkpoint(&cfg, "checkpoints/<run_name>/inference.bin");
 }
 ```
+
+`training_from_checkpoint` で再開する場合、checkpoint の
+`d_model` / `n_heads` / `d_ff` / `n_layers` / `vocab_size` が `Config` と一致している必要がある。
+モデル構造を変えた場合は `training_and_inference`（fresh start）を使う。
+
+## 並列化と性能
+
+CPU の全コアを活用するため、行列演算と損失計算を `rayon` で並列化している。
+
+### 並列化の対象
+
+| ファイル / 関数 | 並列化対象 | 並列粒度 |
+|----------------|----------|---------|
+| `utility::matmul` | 出力行 `i` ループ | 行ごと |
+| `utility::softmax_rows` | 行ごとの softmax | 行ごと |
+| `cross_entropy_loss::forward_sequence` | 各 token の softmax+loss+grad | token ごと |
+
+### matmul / softmax を経由する主な処理
+
+- `multi_head_attention`: Q/K/V/O 射影、scaled-dot-product attention
+- `feed_forward_network`: forward / backward すべて
+- `output_head`: forward / backward すべて
+
+`Vec<Vec<f32>>` の jagged 表現のまま、`matmul` の内側ループ順序を `i-k-j` にすることで
+キャッシュ効率と SIMD 自動ベクトル化を引き出している。
+
+### 並列化されていない箇所
+
+- `embedding`: token id ベースの lookup なので並列化のメリットが薄い
+- `layer_normalization`: 行ごとの統計量計算で軽量
+- `transpose`, `add_matrix_in_place`: 線形時間で軽量
+
+### 効果（M1 Max / 10 コア環境での観察）
+
+`d_model=128, max_len=64, batch_size=16` での 1 step あたりの所要時間がおよそ
+**1 桁短く** なった（並列化前は MHA 以外がシリアル実行だったため）。
+この高速化を前提に、`d_model=256, max_len=128` といった構成変更を
+現実的な時間で試せる。
 
 ## ログの読み方
 

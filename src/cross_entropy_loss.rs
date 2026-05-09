@@ -26,31 +26,32 @@ impl CrossEntropyLoss {
         targets: &[usize],
         mask: &[u8],
     ) -> (f32, Vec<Vec<f32>>) {
-        let mut total_loss = 0.0f32;
-        let mut grads = vec![vec![0.0f32; logits_seq[0].len()]; logits_seq.len()];
+        use rayon::prelude::*;
+
         let valid_count = mask.iter().filter(|&&m| m == 1).count() as f32;
+        let inv_count = 1.0 / valid_count.max(1.0);
+        let vocab = logits_seq[0].len();
 
-        for (i, ((logits, &target), &m)) in logits_seq
-            .iter()
-            .zip(targets.iter())
-            .zip(mask.iter())
-            .enumerate()
-        {
-            if m == 0 {
-                continue;
-            }
-            let (loss, grad) = Self::forward(logits, target);
-            total_loss += loss;
-            grads[i] = grad;
-        }
-
-        let avg_loss = total_loss / valid_count.max(1.0);
-
-        let scaled_grad: Vec<Vec<f32>> = grads
-            .iter()
-            .map(|g| g.iter().map(|&v| v / valid_count.max(1.0)).collect())
+        // 各 token 独立に (loss, scaled_grad) を計算（masked は zero）
+        let results: Vec<(f32, Vec<f32>)> = logits_seq
+            .par_iter()
+            .zip(targets.par_iter())
+            .zip(mask.par_iter())
+            .map(|((logits, &target), &m)| {
+                if m == 0 {
+                    (0.0, vec![0.0f32; vocab])
+                } else {
+                    let (loss, grad) = Self::forward(logits, target);
+                    let scaled: Vec<f32> = grad.into_iter().map(|v| v * inv_count).collect();
+                    (loss, scaled)
+                }
+            })
             .collect();
 
-        (avg_loss, scaled_grad)
+        let total_loss: f32 = results.iter().map(|(l, _)| *l).sum();
+        let avg_loss = total_loss * inv_count;
+        let grads: Vec<Vec<f32>> = results.into_iter().map(|(_, g)| g).collect();
+
+        (avg_loss, grads)
     }
 }

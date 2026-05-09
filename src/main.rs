@@ -53,17 +53,17 @@ impl Config {
         let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
 
         Self {
-            run_name: "matmul_tuning_with_rayon",
-            d_model: 128,
-            n_heads: 4,
-            d_ff: 512,
+            run_name: "phase2_d256_ff1024_max128",
+            d_model: 256,
+            n_heads: 8,
+            d_ff: 1024,
             n_layers: 4,
-            max_len: 64,
+            max_len: 128,
             vocab_size: 4000,
             lr_max: 3e-4,
             lr_min: 1e-5,
             warmup_steps: 200,
-            end_step: 5000,
+            end_step: 10000,
             save_every: 500,
             log_every: 20,
             batch_size: 16,
@@ -78,8 +78,8 @@ impl Config {
 fn main() {
     let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
-    // training_and_inference(&corpus_text, &cfg);
-    training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
+    training_and_inference(&corpus_text, &cfg);
+    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
     // inference_from_checkpoint(&cfg, "checkpoints/batch_size_16/step_001500.bin");
 }
 
