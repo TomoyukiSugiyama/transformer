@@ -8,6 +8,8 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 - Rust (edition 2024)
 - `rand = "0.10.1"`
 - `rayon = "1.10"` （行列演算・損失計算の並列化）
+- `matrixmultiply = "0.3"` （`Matrix::matmul` の SIMD 最適化された pure-Rust BLAS 実装、 非 macOS 環境のフォールバック）
+- macOS: Apple Accelerate Framework（OS 標準なので追加クレート不要、 `#[link(name = "Accelerate", kind = "framework")]` で直接リンク）
 
 ## 実行
 
@@ -115,19 +117,30 @@ fn main() {
   `sum_rows_into_cols`, `map`, `elementwise_with`, `softmax_rows_in_place`
 - MHA 用: `split_columns(n)` / `concat_columns(&[Matrix])`
 
-### 並列化の対象
+### 並列化・最適化の対象
 
-| ファイル / 関数 | 並列化対象 | 並列粒度 |
-|----------------|----------|---------|
-| `matrix::matmul` | 出力行 `i` ループ (`par_chunks_mut`) | 行ごと |
-| `matrix::transpose` | 出力行 (`par_chunks_mut`) | 行ごと |
-| `matrix::add_in_place` | 要素 (`par_iter_mut`) | 要素ごと |
-| `matrix::softmax_rows_in_place` | 行ごとの softmax | 行ごと |
-| `output_head::logits_last` | vocab 次元の射影 | 出力次元 |
-| `cross_entropy_loss::forward_sequence` | 各 token の softmax+loss+grad | token ごと |
+| ファイル / 関数 | 最適化手段 | 並列粒度 |
+|----------------|-----------|---------|
+| `matrix::matmul` (macOS) | **Apple Accelerate `cblas_sgemm` (内部で AMX 活用)** | Accelerate 内部で AMX + マルチコア |
+| `matrix::matmul` (その他 OS) | **`matrixmultiply::sgemm` (pure-Rust SIMD)** | クレート内部で SIMD + キャッシュタイル |
+| `matrix::matmul_naive` | rayon `par_chunks_mut`、`i-k-j` ループ | 行ごと（数値検証・ベンチ用に保持） |
+| `matrix::transpose` | rayon `par_chunks_mut` | 行ごと |
+| `matrix::add_in_place` | rayon `par_iter_mut` | 要素ごと |
+| `matrix::softmax_rows_in_place` | rayon `par_iter` | 行ごと |
+| `output_head::logits_last` | rayon `par_iter` | vocab 次元 |
+| `cross_entropy_loss::forward_sequence` | rayon `par_iter` | token ごと |
 
-`matmul` は内側ループ順序を `i-k-j` にすることでキャッシュ効率と SIMD 自動ベクトル化を引き出している。
-flat 表現により行ごとに連続メモリを扱えるため、`Vec<Vec<f32>>` 版より間接参照ゼロ。
+`matmul` は **OS 別に最適な BLAS バックエンドへ委譲**する:
+- macOS: `cfg(target_os = "macos")` で `extern "C" { fn cblas_sgemm(...) }` を直接呼ぶ。
+  Accelerate Framework は M1/M2/M3 系で内部的に **AMX co-processor** を使うため、
+  大きめの行列で 2〜10× の高速化が得られる (詳細は後述の参考値)。
+- その他 OS: `matrixmultiply::sgemm` で pure-Rust の SIMD カーネルにフォールバック。
+
+flat row-major 表現を採用しているため、 どちらのバックエンドにもゼロコピーで
+`leading_dim = cols` をそのまま渡せる。
+
+`matmul_blas_matches_naive_for_random_matrices` テストで `(1,1,1)` から `(128, 256, 256)` まで
+の各サイズで `matmul_naive` と一致することを保証している (浮動小数誤差 ≤ `1e-3 × k`)。
 
 ### Matrix を経由する主な処理
 
@@ -152,6 +165,20 @@ flat 表現により行ごとに連続メモリを扱えるため、`Vec<Vec<f32
 **1 桁短く** なった（並列化前は MHA 以外がシリアル実行だったため）。
 この高速化を前提に `d_model=256, max_len=128, d_ff=1024` といった大きめの構成も
 数時間で 10000 step 学習できる。
+
+`d_model=256, n_heads=8, d_ff=1024, n_layers=4, max_len=128, batch_size=16`
+構成での参考値:
+
+| 実装 | 1 step | 累積高速化 (推定含む) | 出典 |
+|------|-------|---------------------|------|
+| Vec<Vec<f32>> + シリアル (推定) | 〜30 s | 1.0× (基準) | 直接計測なし、 後述の根拠で外挿 |
+| `Vec<Vec<f32>>` + rayon (Phase 2) | 約 3.0〜3.6 s | 約 8〜10× | Phase 2 (checkpoint mtime) |
+| `Matrix` + rayon naive (BLAS 前) | 約 3.0 s (中央値 3030 ms) | 約 10× | `phase2_d256_ff1024_max128_before_blas.log` |
+| `Matrix` + `matrixmultiply` (BLAS) | 約 1.24 s (中央値 1240 ms) | 約 24× | `phase2_d256_ff1024_max128_with_blas.log` |
+| `Matrix` + Apple Accelerate (AMX) | （測定予定） | — | macOS 専用 |
+
+シリアル版の推定は「シングルスレッド `Vec<Vec<f32>>` で実効 0.5〜1 GFLOP/s × 全 step ~20 GFLOPs」より外挿。
+rayon の単独効果が ~10× と読み取れる。 BLAS で更に 2.4×、 AMX で更に 2× 程度を期待。
 
 ## チューニングのコツ
 
@@ -188,14 +215,17 @@ flat 表現により行ごとに連続メモリを扱えるため、`Vec<Vec<f32
 
 ## 今後の改善案
 
-### 外部 BLAS バックエンドの活用
-flat 表現への移行は完了しているので、次は `matrix::Matrix` 内部の `matmul` を
-外部ライブラリに差し替えるだけで済む:
-- `matrixmultiply` クレート（pure Rust、SIMD 最適化）
-- `ndarray` + `ndarray-linalg`（OpenBLAS / Intel MKL バインディング）
-- Apple Accelerate Framework（macOS の標準 BLAS、`accelerate-src` 経由）
+### Linux/Windows 向け OpenBLAS / Intel MKL バックエンド
+macOS では Accelerate を直接リンクしているが、 他 OS では `matrixmultiply` フォールバック。
+Linux で更なる高速化が必要なら `openblas-src` + 自前 extern、 もしくは `ndarray-linalg`
+経由で OpenBLAS / MKL を呼ぶ手がある。 macOS と同じ構造 (`#[cfg(target_os = ...)]` 分岐) で
+追加できる。
 
-`Matrix::data()` で `&[f32]` をそのまま渡せるため、変換オーバーヘッドなしで導入できる。
+### モデルサイズ拡大による AMX の本領発揮
+現状の `d_model=256` では 1 つの matmul サイズが中規模で AMX の旨味が部分的。
+`d_model=512〜768` まで拡大すると matmul の比率も問題サイズも大きくなり、
+Accelerate が更に効く。 ただしパラメータ数が `d_model²` で増えるので、 corpus 規模との
+バランスに注意 (Tiny Shakespeare では過学習しやすい)。
 
 ### 推論時のキャッシュ機構（KV cache）
 現在の `generate` は token 1 つ生成するたびに過去のトークンを含む全 context を

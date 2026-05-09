@@ -16,6 +16,7 @@ mod checkpoint;
 mod lr_scheduler;
 
 use std::fs;
+use std::io::Write;
 use std::time::Instant;
 
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
@@ -54,7 +55,7 @@ impl Config {
         let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
 
         Self {
-            run_name: "phase2_d256_ff1024_max128",
+            run_name: "phase2_d256_ff1024_max128_with_accelerate",
             d_model: 256,
             n_heads: 8,
             d_ff: 1024,
@@ -79,9 +80,9 @@ impl Config {
 fn main() {
     let corpus_text = load_corpus("corpus/train.txt");
     let cfg = Config::tiny_shakespeare();
-    // training_and_inference(&corpus_text, &cfg);
+    training_and_inference(&corpus_text, &cfg);
     // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
-    inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128/step_002500.bin");
+    // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_before_blas/step_000500.bin");
 }
 
 #[allow(dead_code)]
@@ -186,6 +187,8 @@ fn run_training_loop(
                 ms_per_step,
                 elapsed_s,
             );
+            // ファイルにリダイレクト時の block-buffering を回避し、 tail -f で見られるようにする
+            let _ = std::io::stdout().flush();
             window_min = f32::INFINITY;
             window_max = f32::NEG_INFINITY;
             window_start = Instant::now();

@@ -1,20 +1,53 @@
 //! 行優先 (row-major) の連続メモリで行列を表現する `Matrix`。
 //!
-//! 既存コードは `Vec<Vec<f32>>` (jagged) を使っているが、こちらは将来の高速化と
-//! BLAS 互換性を見据えた flat 表現。`from_jagged` / `to_jagged` で相互変換できる。
+//! 既存コードは `Vec<Vec<f32>>` (jagged) を使っているが、こちらは flat 表現で
+//! メモリ局所性が良く、 BLAS 互換 (`row_stride = cols, col_stride = 1`) でもある。
+//! `from_jagged` / `to_jagged` で相互変換できる。
 //!
 //! 主要 API:
-//! - 構築: `zeros`, `from_jagged`
+//! - 構築: `zeros`, `from_jagged`, `from_flat`
 //! - 形状: `rows`, `cols`, `shape`
 //! - アクセス: `row`, `row_mut`, `get`, `set`, `data`, `data_mut`
-//! - 演算: `matmul`, `transpose`, `add_in_place`
+//! - 演算: `matmul` (BLAS), `matmul_naive` (rayon), `transpose`, `add_in_place`,
+//!         `softmax_rows_in_place`, `split_columns`, `concat_columns` ほか
 //!
-//! 演算は `rayon` で並列化されており、内側ループ順序は `i-k-j` を採用してキャッシュ効率と
-//! SIMD 自動ベクトル化を引き出す。
+//! `matmul` は `matrixmultiply::sgemm` (SIMD + キャッシュタイリングされた pure-Rust BLAS)
+//! に委譲する。 `matmul_naive` は rayon で行並列化した素朴な i-k-j 実装で、 数値検証や
+//! ベンチ用に保持してある。 その他の要素演算 (transpose, add, softmax) は rayon で並列化。
 
 #![allow(dead_code)]
 
 use rayon::prelude::*;
+
+/// macOS では Apple Accelerate Framework (内部で AMX を活用する CBLAS) を使う。
+/// 他 OS では `matrixmultiply` クレート (pure Rust SIMD カーネル) にフォールバック。
+#[cfg(target_os = "macos")]
+mod accelerate {
+    use std::os::raw::{c_float, c_int};
+
+    pub const CBLAS_ROW_MAJOR: c_int = 101;
+    pub const CBLAS_NO_TRANS: c_int = 111;
+
+    #[link(name = "Accelerate", kind = "framework")]
+    unsafe extern "C" {
+        pub fn cblas_sgemm(
+            layout: c_int,
+            transa: c_int,
+            transb: c_int,
+            m: c_int,
+            n: c_int,
+            k: c_int,
+            alpha: c_float,
+            a: *const c_float,
+            lda: c_int,
+            b: *const c_float,
+            ldb: c_int,
+            beta: c_float,
+            c: *mut c_float,
+            ldc: c_int,
+        );
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Matrix {
@@ -117,11 +150,71 @@ impl Matrix {
     }
 
     /// 行列積: `self (m, k) @ other (k, n) → (m, n)`。
-    /// 内側ループは `i-k-j` 順、行ごとに rayon で並列化。
+    /// macOS では Apple Accelerate Framework の `cblas_sgemm` (内部で AMX を活用)、
+    /// それ以外では `matrixmultiply::sgemm` (pure-Rust SIMD カーネル) を使う。
+    /// row-major 表現なので leading dimension は `cols` (= row stride)。
     pub fn matmul(&self, other: &Matrix) -> Matrix {
         assert_eq!(
             self.cols, other.rows,
             "matmul shape mismatch: ({}, {}) × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        let m = self.rows;
+        let k = self.cols;
+        let n = other.cols;
+        let mut out = Matrix::zeros(m, n);
+
+        #[cfg(target_os = "macos")]
+        // SAFETY: out は (m, n) を確保済みで self/other とメモリ非共有。
+        // row-major かつ no-transpose、 leading dim = cols (= 行内連続の row stride)。
+        unsafe {
+            accelerate::cblas_sgemm(
+                accelerate::CBLAS_ROW_MAJOR,
+                accelerate::CBLAS_NO_TRANS,
+                accelerate::CBLAS_NO_TRANS,
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0,
+                self.data.as_ptr(),
+                k as i32,
+                other.data.as_ptr(),
+                n as i32,
+                0.0,
+                out.data.as_mut_ptr(),
+                n as i32,
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        // SAFETY: 同上。 matrixmultiply の row/col stride 表現に合わせる。
+        unsafe {
+            matrixmultiply::sgemm(
+                m,
+                k,
+                n,
+                1.0,
+                self.data.as_ptr(),
+                self.cols as isize,
+                1,
+                other.data.as_ptr(),
+                other.cols as isize,
+                1,
+                0.0,
+                out.data.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+        }
+
+        out
+    }
+
+    /// rayon 並列の素朴な i-k-j matmul。 BLAS との数値比較やベンチ用に残してある。
+    pub fn matmul_naive(&self, other: &Matrix) -> Matrix {
+        assert_eq!(
+            self.cols, other.rows,
+            "matmul_naive shape mismatch: ({}, {}) × ({}, {})",
             self.rows, self.cols, other.rows, other.cols
         );
         let m = self.rows;
@@ -389,6 +482,39 @@ mod tests {
         let a = Matrix::zeros(2, 3);
         let b = Matrix::zeros(4, 5);
         let _ = a.matmul(&b);
+    }
+
+    /// BLAS 版 matmul と naive 版 matmul が浮動小数誤差の範囲で一致することを確認。
+    /// AdamW やレイヤー実装が naive を前提にしていたので、 ここで等価性を保証しておく。
+    #[test]
+    fn matmul_blas_matches_naive_for_random_matrices() {
+        use rand::{RngExt, SeedableRng, rngs::SmallRng};
+        let mut rng = SmallRng::seed_from_u64(123);
+        let cases: &[(usize, usize, usize)] = &[
+            (1, 1, 1),
+            (3, 5, 7),
+            (16, 32, 8),
+            (64, 128, 256),
+            (128, 256, 256),
+        ];
+        for &(m, k, n) in cases {
+            let a_data: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let b_data: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let a = Matrix::from_flat(a_data, m, k);
+            let b = Matrix::from_flat(b_data, k, n);
+            let c_blas = a.matmul(&b);
+            let c_naive = a.matmul_naive(&b);
+            assert_eq!(c_blas.shape(), c_naive.shape());
+            // 行優先 dot 累積差は ε * k 程度
+            let tol = 1e-3 * k as f32;
+            for (x, y) in c_blas.data().iter().zip(c_naive.data().iter()) {
+                assert!(
+                    (x - y).abs() <= tol,
+                    "shape=({m},{k},{n}) blas={x} naive={y} diff={}",
+                    (x - y).abs()
+                );
+            }
+        }
     }
 
     #[test]
