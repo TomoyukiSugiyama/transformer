@@ -22,12 +22,18 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 ./scripts/download_tiny_shakespeare.sh
 # → corpus/tiny_shakespeare.txt
 
-# 夏目漱石「こころ」 (162k char ≈ 484 KB UTF-8, 日本語) — Phase 4 用
+# 夏目漱石「こころ」 (162k char ≈ 484 KB UTF-8, 日本語) — Phase 4a 用
 ./scripts/download_aozora_kokoro.sh
 # → corpus/aozora_kokoro.txt
+
+# 夏目漱石主要長編 7 作品 (1.21M char ≈ 3.5 MB UTF-8, 日本語) — Phase 4b 用
+./scripts/download_aozora_soseki_works.sh
+# → corpus/aozora_soseki_works.txt
+# 含まれる作品: 吾輩は猫である / 坊っちゃん / 草枕 / 三四郎 / 行人 / こころ / 道草
+# (全て新字新仮名のみ。 「それから」「門」 は仮名遣いが異なるため除外)
 ```
 
-`aozora_kokoro` の方は青空文庫の Shift-JIS zip から UTF-8 に変換し、
+青空文庫系のスクリプトは Shift-JIS zip から UTF-8 に変換し、
 ルビ (`《...》`)・ 編集注記 (`［＃...］`)・ 底本情報を除去した本文を出力する
 (python3 が必要)。
 
@@ -118,12 +124,14 @@ src/
 └── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
 
 scripts/
-├── download_tiny_shakespeare.sh   # Karpathy char-rnn から取得
-└── download_aozora_kokoro.sh      # 青空文庫 zip → UTF-8 + ルビ除去 (要 python3)
+├── download_tiny_shakespeare.sh    # Karpathy char-rnn から取得
+├── download_aozora_kokoro.sh       # 青空文庫「こころ」 → UTF-8 + ルビ除去 (要 python3)
+└── download_aozora_soseki_works.sh # 漱石主要長編 7 作品を連結 (要 python3)
 
-corpus/                            # gitignore (各種スクリプトで再生成可能)
-├── tiny_shakespeare.txt           # Phase 2 / 3 用 (英語 1.1 MB)
-└── aozora_kokoro.txt              # Phase 4 用 (日本語 484 KB, 夏目漱石「こころ」)
+corpus/                             # gitignore (各種スクリプトで再生成可能)
+├── tiny_shakespeare.txt            # Phase 2 / 3 用 (英語 1.1 MB, ~330k token)
+├── aozora_kokoro.txt               # Phase 4a 用 (日本語 484 KB, ~162k char)
+└── aozora_soseki_works.txt         # Phase 4b 用 (日本語 3.5 MB, ~1.21M char)
 
 logs/                              # gitignore (学習ログの保存先)
 └── <run_name>.log

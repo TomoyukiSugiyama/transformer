@@ -150,29 +150,71 @@ impl Config {
         }
     }
 
-    /// Phase 4: 夏目漱石「こころ」 (青空文庫, ~162k char / ~484k UTF-8 bytes) を BPE で学習。
-    /// nanoGPT 相当のアーキは流用しつつ、 コーパスが Tiny Shakespeare の 1/7 規模なので
-    /// vocab_size と end_step を縮小し、 過学習を val_loss で検知する。
+    /// Phase 4: 夏目漱石「こころ」 (青空文庫, ~162k char / ~484k UTF-8 bytes) を Char tokenizer で学習。
+    /// nanoGPT 相当のアーキ (`nano_gpt_equivalent`) を流用しつつ、 コーパスが Tiny Shakespeare の
+    /// 1/7 規模なので過学習が早く来る (前回 BPE 試走で val 最良 step 200, 過学習 step 300+)。
+    /// そのため end_step を 1000、 save_every を 100 にして val 最良点を逃さないようにする。
+    ///
+    /// BPE byte-level だと日本語 (1 char = 3 byte) でマージが UTF-8 境界を跨いで
+    /// decode 時に文字化けが出るため、 Char tokenizer (vocab はコーパス文字種から自動) に切替。
+    ///
     /// `scripts/download_aozora_kokoro.sh` で corpus/aozora_kokoro.txt を生成しておくこと。
     #[allow(dead_code)]
     fn aozora_kokoro() -> Self {
         let prompts = vec!["私は", "先生は", "ある日", "東京の"];
 
         Self {
-            run_name: "phase4_aozora_kokoro_d384_n6_bpe",
+            run_name: "phase4_aozora_kokoro_d384_n6_char",
             corpus_path: "corpus/aozora_kokoro.txt",
-            tokenizer_kind: TokenizerKind::Bpe,
+            tokenizer_kind: TokenizerKind::Char,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 256,
-            vocab_size: 2000,
+            vocab_size: 0, // unused for Char (コーパスの文字種から自動算出)
             lr_max: 1e-3,
             lr_min: 1e-4,
             warmup_steps: 100,
-            end_step: 3000,
-            save_every: 250,
+            end_step: 1000,
+            save_every: 100,
+            log_every: 20,
+            val_every: 100,
+            val_n_batches: 16,
+            val_split_ratio: 0.1,
+            batch_size: 64,
+            dropout: 0.2,
+            weight_decay: 0.1,
+            beta2: 0.99,
+            prompts,
+        }
+    }
+
+    /// Phase 4 拡張: 夏目漱石主要長編 7 作品 (青空文庫, ~1.21M char) を Char tokenizer で学習。
+    /// 取得スクリプト: `scripts/download_aozora_soseki_works.sh`
+    /// 含まれる作品 (全て新字新仮名): 吾輩は猫である / 坊っちゃん / 草枕 / 三四郎 / 行人 / こころ / 道草
+    /// 参考: ユニーク文字数 ~3720 (Phase 4 こころ単独 ~2300 の 1.6 倍, Phase 3 英語 65 の ~57 倍)。
+    /// コーパスサイズが Tiny Shakespeare とほぼ同じなので Phase 3 設定をベースに、
+    /// vocab 増加分の余裕を見て end_step を 2000 (Phase 3 の 5000 は過剰) に短縮。
+    #[allow(dead_code)]
+    fn aozora_soseki_works() -> Self {
+        let prompts = vec!["私は", "先生は", "ある日", "東京の", "吾輩は", "それから"];
+
+        Self {
+            run_name: "phase4b_aozora_soseki_works_d384_n6_char",
+            corpus_path: "corpus/aozora_soseki_works.txt",
+            tokenizer_kind: TokenizerKind::Char,
+            d_model: 384,
+            n_heads: 6,
+            d_ff: 1536,
+            n_layers: 6,
+            max_len: 256,
+            vocab_size: 0, // unused for Char (~3720 自動算出)
+            lr_max: 1e-3,
+            lr_min: 1e-4,
+            warmup_steps: 100,
+            end_step: 2000,
+            save_every: 200,
             log_every: 20,
             val_every: 100,
             val_n_batches: 16,
@@ -190,15 +232,25 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 4: 夏目漱石「こころ」 (青空文庫, BPE, d_model=384, n_layers=6, dropout=0.2)
+    // Phase 4a: 夏目漱石「こころ」 単独 (青空文庫, Char tokenizer, d_model=384, dropout=0.2)
     let cfg = Config::aozora_kokoro();
     training_and_inference(&cfg);
-    // 推論のみ:
-    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_bpe/inference.bin");
-    // Phase 3 (nanoGPT 相当, char-level Tiny Shakespeare):
+
+    // 他の Config に切替えるには下記を有効化:
+    //
+    // Phase 4b: 漱石主要長編 7 作品 (~1.21M char, Char tokenizer)
+    // let cfg = Config::aozora_soseki_works();
+    // training_and_inference(&cfg);
+    //
+    // Phase 4 旧 (BPE) checkpoint で推論:
+    // let cfg = Config::aozora_kokoro();   // 一時的に tokenizer_kind を Bpe に変更が必要
+    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_bpe/step_000250.bin");
+    //
+    // Phase 3: nanoGPT 相当 char-level Tiny Shakespeare
     // let cfg = Config::nano_gpt_equivalent();
     // inference_from_checkpoint(&cfg, "checkpoints/phase3_nanogpt_equiv_d384_n6_char/step_001000.bin");
-    // Phase 2 (BPE Tiny Shakespeare):
+    //
+    // Phase 2: BPE Tiny Shakespeare
     // let cfg = Config::tiny_shakespeare();
     // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_with_accelerate/step_002500.bin");
 }
