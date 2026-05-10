@@ -212,6 +212,21 @@ unsafe { matrixmultiply::sgemm(...) }     // pure-Rust SIMD カーネル
 - `d_head = d_model / n_heads = 32〜64` が扱いやすい。
 - `max_len` を上げると attention は `O(n²)` で重くなる。 学習対象 (対話 1 ターン: ~100 token、 シーン: ~500 token) に合わせて選ぶ。
 
+### 同規模モデルとの比較
+
+| モデル | d_model | n_layers | パラメータ数 | 用途 |
+|--------|---------|----------|------------|------|
+| **本実装 (phase2)** | **256** | **4** | **~5.2M** | **本リポジトリ (`Config::tiny_shakespeare`)** |
+| nanoGPT (Shakespeare 例) | 384 | 6 | 10.7M | Shakespeare 標準と比較 |
+| GPT-2 small | 768 | 12 | 124M | 公開最小モデル |
+
+本実装は nanoGPT Shakespeare 例の **約 1/2 サイズ**。 同じ Tiny Shakespeare コーパスに対して
+`d_model` を 384→256、 `n_layers` を 6→4 に縮めた構成で、 学習時間と推論品質のバランス
+(M1 Max で 10000 step ≒ 2 時間) を優先している。 上記「過学習と最適 step の見極め」で
+品質ピークが step 2500〜3500 で訪れるのは、 このモデル容量と ~330k token コーパスの組み合わせに
+固有のもの。 容量を nanoGPT と同等に上げれば品質ピークはより遅い step に移り、 GPT-2 small 級まで
+スケールさせれば過学習までに使えるデータ量も大幅に増える。
+
 ### 推論時の繰り返し対策
 - greedy はすぐに同じ語句に落ち込みやすいので、 **top-k サンプリング + 適度な temperature** (例: `top_k=5, temperature=1.0`) の方が自然な文章になる。
 - `my lord, my lord, ...` のような繰り返しは **repetition penalty** で軽減する。 `LanguageModel::generate*` は `repetition_penalty` 引数を受け取り、 `1.1〜1.3` 程度が無難。 HuggingFace と同じ式 (正は割り算、 負は掛ける) で過去に出現した token を抑制。
