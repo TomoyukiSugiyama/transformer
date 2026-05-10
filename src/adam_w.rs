@@ -58,16 +58,34 @@ pub struct AdamW {
 
 impl AdamW {
     pub fn new(lr: f32) -> Self {
+        Self::new_with_wd(lr, 0.01)
+    }
+
+    pub fn new_with_wd(lr: f32, wd: f32) -> Self {
         Self {
             lr,
             beta1: 0.9,
             beta2: 0.999,
             eps: 1e-8,
-            wd: 0.01,
+            wd,
             step_count: 0,
             moments: HashMap::new(),
             grad_scale: 1.0,
         }
+    }
+
+    /// 学習途中で weight decay を変更する。 通常は constructor で指定し
+    /// 触らないが、 checkpoint 復元後に Config の値で上書きする等で使う。
+    #[allow(dead_code)]
+    pub fn set_wd(&mut self, wd: f32) {
+        self.wd = wd;
+    }
+
+    /// `beta2` を変更する。 nanoGPT の Shakespeare-char 設定 (= 0.99) に
+    /// 揃えたい場合などに使う。
+    #[allow(dead_code)]
+    pub fn set_beta2(&mut self, beta2: f32) {
+        self.beta2 = beta2;
     }
 
     pub fn set_grad_scale(&mut self, batch_size: usize) {

@@ -15,12 +15,24 @@ pub struct Transformer {
 }
 
 impl Transformer {
-    pub fn new(n_layers: usize, d_model: usize, n_heads: usize, d_ff: usize) -> Self {
+    pub fn new(
+        n_layers: usize,
+        d_model: usize,
+        n_heads: usize,
+        d_ff: usize,
+        dropout_p: f32,
+    ) -> Self {
         Self {
             blocks: (0..n_layers)
-                .map(|_| TransformerBlock::new(d_model, n_heads, d_ff))
+                .map(|_| TransformerBlock::new(d_model, n_heads, d_ff, dropout_p))
                 .collect(),
             final_norm: LayerNormalization::new(d_model),
+        }
+    }
+
+    pub fn set_training(&mut self, training: bool) {
+        for block in &mut self.blocks {
+            block.set_training(training);
         }
     }
 

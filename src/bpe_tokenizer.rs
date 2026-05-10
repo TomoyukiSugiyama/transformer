@@ -3,7 +3,10 @@ use std::{
     io::{Error, ErrorKind, Result},
 };
 
-use crate::checkpoint::{Checkpointable, WeightMap};
+use crate::{
+    checkpoint::{Checkpointable, WeightMap},
+    tokenizer::{Tokenizer, TokenizerKind},
+};
 
 const WORD_END: &str = "</w>";
 
@@ -334,6 +337,7 @@ impl BpeTokenizer {
 impl Checkpointable for BpeTokenizer {
     fn to_weight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
+        map.insert_scalar("kind", TokenizerKind::Bpe.as_u64());
         map.insert_strings("id_to_token", self.id_to_token.clone());
         map.insert_scalar("unk_id", self.unk_id as u64);
 
@@ -382,5 +386,39 @@ impl Checkpointable for BpeTokenizer {
         self.unk_id = unk_id;
 
         Ok(())
+    }
+}
+
+impl Tokenizer for BpeTokenizer {
+    fn vocab_size(&self) -> usize {
+        BpeTokenizer::vocab_size(self)
+    }
+
+    fn pad_id(&self) -> usize {
+        BpeTokenizer::pad_id(self)
+    }
+
+    fn eos_id(&self) -> usize {
+        BpeTokenizer::eos_id(self)
+    }
+
+    fn encode_long(&self, text: &str) -> Vec<usize> {
+        BpeTokenizer::encode_long(self, text)
+    }
+
+    fn encode_prompt(&self, text: &str) -> Vec<usize> {
+        BpeTokenizer::encode_prompt(self, text)
+    }
+
+    fn decode(&self, ids: &[usize]) -> String {
+        BpeTokenizer::decode(self, ids)
+    }
+
+    fn kind(&self) -> TokenizerKind {
+        TokenizerKind::Bpe
+    }
+
+    fn to_weight_map(&self) -> WeightMap {
+        Checkpointable::to_weight_map(self)
     }
 }

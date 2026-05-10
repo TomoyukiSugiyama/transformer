@@ -1,7 +1,10 @@
 mod adam_w;
 mod bpe_tokenizer;
+mod char_tokenizer;
 mod cross_entropy_loss;
+mod dropout;
 mod embedding;
+mod eval;
 mod feed_forward_network;
 mod language_model;
 mod layer_normalization;
@@ -9,6 +12,7 @@ mod matrix;
 mod multi_head_attention;
 mod output_head;
 mod sinusoidal_pe;
+mod tokenizer;
 mod transformer;
 mod transformer_block;
 
@@ -24,7 +28,7 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
     layer_normalization::LayerNormalization, lr_scheduler::LrScheduler,
-    multi_head_attention::MultiHeadAttention,
+    multi_head_attention::MultiHeadAttention, tokenizer::TokenizerKind,
 };
 
 /// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
@@ -32,13 +36,31 @@ fn load_corpus(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("corpus file '{}' not found: {}", path, e))
 }
 
+/// コーパスを (train, val) に分割する。 char 数で `val_ratio` 比率を末尾に切り出す。
+/// nanoGPT (Shakespeare-char) の `prepare.py` と同じ「単純な末尾切り取り」方式で、
+/// 学習用テキストには val 部分のテキストが一切含まれないようにする。
+fn load_corpus_split(path: &str, val_ratio: f32) -> (String, String) {
+    let text = load_corpus(path);
+    if val_ratio <= 0.0 {
+        return (text, String::new());
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let val_chars = ((chars.len() as f32) * val_ratio).round() as usize;
+    let split = chars.len().saturating_sub(val_chars);
+    let train: String = chars[..split].iter().collect();
+    let val: String = chars[split..].iter().collect();
+    (train, val)
+}
+
 struct Config {
     run_name: &'static str,
+    tokenizer_kind: TokenizerKind,
     d_model: usize,
     n_heads: usize,
     d_ff: usize,
     n_layers: usize,
     max_len: usize,
+    /// BPE のときのみ参照される。 char-level では corpus の文字種から自動決定。
     vocab_size: usize,
     lr_max: f32,
     lr_min: f32,
@@ -46,16 +68,29 @@ struct Config {
     end_step: usize,
     save_every: usize,
     log_every: usize,
+    /// 0 のとき val を計測しない。 それ以外なら毎 `val_every` step で
+    /// `val_n_batches` 個のランダム窓に対して val_loss を計測。
+    val_every: usize,
+    val_n_batches: usize,
+    val_split_ratio: f32,
     batch_size: usize,
+    /// dropout 率 (0.0 で無効)。 nanoGPT Shakespeare-char は 0.2。
+    dropout: f32,
+    /// AdamW の weight decay。 nanoGPT は 0.1 を使用。
+    weight_decay: f32,
+    /// AdamW の beta2。 1 step あたり tokens が少ないコーパスでは 0.99 が推奨。
+    beta2: f32,
     prompts: Vec<&'static str>,
 }
 
 impl Config {
+    #[allow(dead_code)]
     fn tiny_shakespeare() -> Self {
         let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
 
         Self {
             run_name: "phase2_d256_ff1024_max128_with_accelerate",
+            tokenizer_kind: TokenizerKind::Bpe,
             d_model: 256,
             n_heads: 8,
             d_ff: 1024,
@@ -68,7 +103,45 @@ impl Config {
             end_step: 10000,
             save_every: 500,
             log_every: 20,
+            val_every: 0,
+            val_n_batches: 16,
+            val_split_ratio: 0.0,
             batch_size: 16,
+            dropout: 0.0,
+            weight_decay: 0.01,
+            beta2: 0.999,
+            prompts,
+        }
+    }
+
+    /// nanoGPT (Shakespeare-char) と同等構成 (Phase 3 ターゲット)。
+    /// パラメータ ~10.7M、 char tokenizer (vocab はコーパスから自動)。
+    #[allow(dead_code)]
+    fn nano_gpt_equivalent() -> Self {
+        let prompts = vec!["I have seen", "O Romeo", "To be or not to be", "What news"];
+
+        Self {
+            run_name: "phase3_nanogpt_equiv_d384_n6_char",
+            tokenizer_kind: TokenizerKind::Char,
+            d_model: 384,
+            n_heads: 6,
+            d_ff: 1536,
+            n_layers: 6,
+            max_len: 256,
+            vocab_size: 0, // unused for Char
+            lr_max: 1e-3,
+            lr_min: 1e-4,
+            warmup_steps: 100,
+            end_step: 5000,
+            save_every: 500,
+            log_every: 20,
+            val_every: 100,
+            val_n_batches: 16,
+            val_split_ratio: 0.1,
+            batch_size: 64,
+            dropout: 0.2,
+            weight_decay: 0.1,
+            beta2: 0.99,
             prompts,
         }
     }
@@ -78,11 +151,12 @@ impl Config {
     }
 }
 fn main() {
-    let corpus_text = load_corpus("corpus/train.txt");
-    let cfg = Config::tiny_shakespeare();
-    training_and_inference(&corpus_text, &cfg);
-    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/batch_size_16/step_001500.bin");
-    // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_before_blas/step_000500.bin");
+    // Phase 3: nanoGPT 相当 (d_model=384, n_layers=6, char-level, dropout=0.2)
+    let cfg = Config::nano_gpt_equivalent();
+    training_and_inference(&cfg);
+    // 既存 BPE checkpoint で推論する場合 (Phase 2):
+    // let cfg = Config::tiny_shakespeare();
+    // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_with_accelerate/step_002500.bin");
 }
 
 #[allow(dead_code)]
@@ -96,10 +170,11 @@ fn run_training_loop(
     opt: &mut AdamW,
     rng: &mut SmallRng,
     token_ids: &[usize],
+    val_ids: &[usize],
     cfg: &Config,
     start_step: usize,
 ) {
-    let pad_id = model.tokenizer.pad_id();
+    let pad_id = model.pad_id();
     let mut ema_loss: Option<f32> = None;
     let mut window_min = f32::INFINITY;
     let mut window_max = f32::NEG_INFINITY;
@@ -115,10 +190,22 @@ fn run_training_loop(
     );
     let max_offset = token_ids.len() - chunk_len;
 
+    let val_enabled = cfg.val_every > 0 && val_ids.len() > chunk_len;
+    const VAL_SEED: u64 = 12345;
+
     println!("# run_name={}", cfg.run_name);
     println!(
-        "# d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}",
-        cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.n_layers, cfg.max_len, cfg.vocab_size
+        "# tokenizer={:?}, d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}, dropout={}, wd={}, beta2={}",
+        model.tokenizer_kind(),
+        cfg.d_model,
+        cfg.n_heads,
+        cfg.d_ff,
+        cfg.n_layers,
+        cfg.max_len,
+        cfg.vocab_size,
+        cfg.dropout,
+        cfg.weight_decay,
+        cfg.beta2,
     );
     println!(
         "# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}",
@@ -132,10 +219,14 @@ fn run_training_loop(
         start_step
     );
     println!(
-        "# corpus_tokens={}, chunk_len={}, max_offset={}",
+        "# corpus_tokens={}, chunk_len={}, max_offset={}, val_enabled={}, val_tokens={}, val_every={}, val_n_batches={}",
         token_ids.len(),
         chunk_len,
-        max_offset
+        max_offset,
+        val_enabled,
+        val_ids.len(),
+        cfg.val_every,
+        cfg.val_n_batches,
     );
     println!("step,loss,ema,min,max,lr,ms_per_step,elapsed_s");
 
@@ -193,6 +284,21 @@ fn run_training_loop(
             window_max = f32::NEG_INFINITY;
             window_start = Instant::now();
         }
+        if val_enabled && step % cfg.val_every == 0 {
+            let val_loss = eval::compute_val_loss(
+                model,
+                val_ids,
+                chunk_len,
+                cfg.val_n_batches,
+                VAL_SEED,
+            );
+            let val_ppl = eval::perplexity(val_loss);
+            println!(
+                "# val step={} val_loss={:.6} val_ppl={:.4}",
+                step, val_loss, val_ppl
+            );
+            let _ = std::io::stdout().flush();
+        }
         if step % cfg.save_every == 0 {
             let path = format!("{ckpt_dir}/step_{step:06}.bin");
             let latest_path = format!("{ckpt_dir}/latest.bin");
@@ -206,30 +312,45 @@ fn run_training_loop(
 }
 
 #[allow(dead_code)]
-fn training_and_inference(corpus_text: &str, cfg: &Config) {
+fn training_and_inference(cfg: &Config) {
+    let (train_text, val_text) = load_corpus_split("corpus/train.txt", cfg.val_split_ratio);
     let mut model = LanguageModel::new(
-        corpus_text,
+        &train_text,
+        cfg.tokenizer_kind,
         cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,
         cfg.d_ff,
         cfg.n_layers,
         cfg.max_len,
+        cfg.dropout,
     );
-    let token_ids = model.tokenize_corpus(corpus_text);
-    let mut opt = AdamW::new(cfg.lr_max);
+    let token_ids = model.tokenize_corpus(&train_text);
+    let val_ids = if val_text.is_empty() {
+        Vec::new()
+    } else {
+        model.tokenize_corpus(&val_text)
+    };
+    let mut opt = AdamW::new_with_wd(cfg.lr_max, cfg.weight_decay);
+    opt.set_beta2(cfg.beta2);
     let mut rng = SmallRng::seed_from_u64(42);
-    run_training_loop(&mut model, &mut opt, &mut rng, &token_ids, cfg, 1);
+    run_training_loop(&mut model, &mut opt, &mut rng, &token_ids, &val_ids, cfg, 1);
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
     infer(&mut model, &cfg.prompts);
 }
 
 #[allow(dead_code)]
-fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
+fn training_from_checkpoint(cfg: &Config, path: &str) {
+    let (train_text, val_text) = load_corpus_split("corpus/train.txt", cfg.val_split_ratio);
     let (mut model, mut opt, checkpoint_step) =
         LanguageModel::load_training_checkpoint(path).unwrap();
-    let token_ids = model.tokenize_corpus(corpus_text);
+    let token_ids = model.tokenize_corpus(&train_text);
+    let val_ids = if val_text.is_empty() {
+        Vec::new()
+    } else {
+        model.tokenize_corpus(&val_text)
+    };
     let mut rng = SmallRng::seed_from_u64(42);
     // RNG を消費して整合させる（任意）: 各 step で batch_size 回 random_range を呼んでいたため
     let max_offset = token_ids.len() - cfg.max_len;
@@ -241,6 +362,7 @@ fn training_from_checkpoint(corpus_text: &str, cfg: &Config, path: &str) {
         &mut opt,
         &mut rng,
         &token_ids,
+        &val_ids,
         cfg,
         checkpoint_step + 1,
     );
