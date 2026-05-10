@@ -1,2 +1,5 @@
 /target
 /checkpoints
+/corpus
+/logs
+*.log

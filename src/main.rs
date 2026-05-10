@@ -54,6 +54,8 @@ fn load_corpus_split(path: &str, val_ratio: f32) -> (String, String) {
 
 struct Config {
     run_name: &'static str,
+    /// 学習・推論で読み込む corpus テキストファイルへのパス
+    corpus_path: &'static str,
     tokenizer_kind: TokenizerKind,
     d_model: usize,
     n_heads: usize,
@@ -90,6 +92,7 @@ impl Config {
 
         Self {
             run_name: "phase2_d256_ff1024_max128_with_accelerate",
+            corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Bpe,
             d_model: 256,
             n_heads: 8,
@@ -122,6 +125,7 @@ impl Config {
 
         Self {
             run_name: "phase3_nanogpt_equiv_d384_n6_char",
+            corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Char,
             d_model: 384,
             n_heads: 6,
@@ -146,15 +150,55 @@ impl Config {
         }
     }
 
+    /// Phase 4: 夏目漱石「こころ」 (青空文庫, ~162k char / ~484k UTF-8 bytes) を BPE で学習。
+    /// nanoGPT 相当のアーキは流用しつつ、 コーパスが Tiny Shakespeare の 1/7 規模なので
+    /// vocab_size と end_step を縮小し、 過学習を val_loss で検知する。
+    /// `scripts/download_aozora_kokoro.sh` で corpus/aozora_kokoro.txt を生成しておくこと。
+    #[allow(dead_code)]
+    fn aozora_kokoro() -> Self {
+        let prompts = vec!["私は", "先生は", "ある日", "東京の"];
+
+        Self {
+            run_name: "phase4_aozora_kokoro_d384_n6_bpe",
+            corpus_path: "corpus/aozora_kokoro.txt",
+            tokenizer_kind: TokenizerKind::Bpe,
+            d_model: 384,
+            n_heads: 6,
+            d_ff: 1536,
+            n_layers: 6,
+            max_len: 256,
+            vocab_size: 2000,
+            lr_max: 1e-3,
+            lr_min: 1e-4,
+            warmup_steps: 100,
+            end_step: 3000,
+            save_every: 250,
+            log_every: 20,
+            val_every: 100,
+            val_n_batches: 16,
+            val_split_ratio: 0.1,
+            batch_size: 64,
+            dropout: 0.2,
+            weight_decay: 0.1,
+            beta2: 0.99,
+            prompts,
+        }
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
 }
 fn main() {
-    // Phase 3: nanoGPT 相当 (d_model=384, n_layers=6, char-level, dropout=0.2)
-    let cfg = Config::nano_gpt_equivalent();
+    // Phase 4: 夏目漱石「こころ」 (青空文庫, BPE, d_model=384, n_layers=6, dropout=0.2)
+    let cfg = Config::aozora_kokoro();
     training_and_inference(&cfg);
-    // 既存 BPE checkpoint で推論する場合 (Phase 2):
+    // 推論のみ:
+    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_bpe/inference.bin");
+    // Phase 3 (nanoGPT 相当, char-level Tiny Shakespeare):
+    // let cfg = Config::nano_gpt_equivalent();
+    // inference_from_checkpoint(&cfg, "checkpoints/phase3_nanogpt_equiv_d384_n6_char/step_001000.bin");
+    // Phase 2 (BPE Tiny Shakespeare):
     // let cfg = Config::tiny_shakespeare();
     // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_with_accelerate/step_002500.bin");
 }
@@ -313,7 +357,7 @@ fn run_training_loop(
 
 #[allow(dead_code)]
 fn training_and_inference(cfg: &Config) {
-    let (train_text, val_text) = load_corpus_split("corpus/train.txt", cfg.val_split_ratio);
+    let (train_text, val_text) = load_corpus_split(cfg.corpus_path, cfg.val_split_ratio);
     let mut model = LanguageModel::new(
         &train_text,
         cfg.tokenizer_kind,
@@ -342,7 +386,7 @@ fn training_and_inference(cfg: &Config) {
 
 #[allow(dead_code)]
 fn training_from_checkpoint(cfg: &Config, path: &str) {
-    let (train_text, val_text) = load_corpus_split("corpus/train.txt", cfg.val_split_ratio);
+    let (train_text, val_text) = load_corpus_split(cfg.corpus_path, cfg.val_split_ratio);
     let (mut model, mut opt, checkpoint_step) =
         LanguageModel::load_training_checkpoint(path).unwrap();
     let token_ids = model.tokenize_corpus(&train_text);

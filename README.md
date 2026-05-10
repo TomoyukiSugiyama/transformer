@@ -13,14 +13,32 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 
 ## 実行
 
+### コーパス取得
+
+学習データは外部から取得する。 用途別にスクリプトを用意してある:
+
+```bash
+# Tiny Shakespeare (1.1 MB, 英語) — Phase 2 / 3 用
+./scripts/download_tiny_shakespeare.sh
+# → corpus/tiny_shakespeare.txt
+
+# 夏目漱石「こころ」 (162k char ≈ 484 KB UTF-8, 日本語) — Phase 4 用
+./scripts/download_aozora_kokoro.sh
+# → corpus/aozora_kokoro.txt
+```
+
+`aozora_kokoro` の方は青空文庫の Shift-JIS zip から UTF-8 に変換し、
+ルビ (`《...》`)・ 編集注記 (`［＃...］`)・ 底本情報を除去した本文を出力する
+(python3 が必要)。
+
 ### 学習
 
 ```bash
 cargo run --release
 ```
 
-`Config::tiny_shakespeare()` で定義された設定で学習が始まり、 `checkpoints/<run_name>/` 配下に
-checkpoint が保存される。
+`src/main.rs` の `main()` で選択した `Config` (例: `Config::aozora_kokoro()`)
+の設定で学習が始まり、 `checkpoints/<run_name>/` 配下に checkpoint が保存される。
 
 ### CSV ログとして保存
 
@@ -41,14 +59,14 @@ grep -E '^(step,|[0-9]+,)' train.log > train.csv
 
 ```rust
 fn main() {
-    let corpus_text = load_corpus("corpus/train.txt");
-    let cfg = Config::tiny_shakespeare();
+    // 学習対象の Config を選ぶ (corpus_path はそれぞれの Config 内で固定)
+    let cfg = Config::aozora_kokoro();    // または ::nano_gpt_equivalent() / ::tiny_shakespeare()
 
     // 新規学習
-    training_and_inference(&corpus_text, &cfg);
+    training_and_inference(&cfg);
 
     // checkpoint から再開（同じモデル構造の checkpoint のみ）
-    // training_from_checkpoint(&corpus_text, &cfg, "checkpoints/<run_name>/latest.bin");
+    // training_from_checkpoint(&cfg, "checkpoints/<run_name>/latest.bin");
 
     // checkpoint を読み込んで推論のみ
     // inference_from_checkpoint(&cfg, "checkpoints/<run_name>/inference.bin");
@@ -96,7 +114,12 @@ src/
 └── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
 
 corpus/
-└── train.txt                  # 学習データ（全行を連結し、 ランダム窓でサンプリング）
+├── tiny_shakespeare.txt       # Phase 2 / 3 用 (英語 1.1 MB)
+└── aozora_kokoro.txt          # Phase 4 用 (日本語 484 KB, 夏目漱石「こころ」)
+
+scripts/
+├── download_tiny_shakespeare.sh
+└── download_aozora_kokoro.sh  # 青空文庫 zip → UTF-8 + ルビ除去
 
 checkpoints/<run_name>/
 ├── step_NNNNNN.bin            # 学習途中の checkpoint
