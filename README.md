@@ -96,30 +96,41 @@ fn main() {
 
 ```
 src/
-├── main.rs                    # エントリ・学習ループ
-├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate
+├── main.rs                    # エントリ・学習ループ・Config (corpus 別プリセット)
+├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate / val 用 forward_loss
 ├── transformer.rs             # Transformer (block の積み重ね)
-├── transformer_block.rs       # 1 ブロック (MHA + FFN + LayerNorm)
+├── transformer_block.rs       # 1 ブロック (MHA + FFN + LayerNorm + Dropout × 2)
 ├── multi_head_attention.rs    # マルチヘッドアテンション
-├── feed_forward_network.rs    # 位置ごとの FFN
-├── layer_normalization.rs
+├── feed_forward_network.rs    # 位置ごとの FFN (Linear → GELU → Linear)
+├── layer_normalization.rs     # Layer Normalization (γ, β 学習 + 数値安定化)
+├── dropout.rs                 # Inverted dropout (training / eval 切替)
 ├── embedding.rs               # トークン埋め込み
 ├── sinusoidal_pe.rs           # 正弦波位置エンコーディング
 ├── output_head.rs             # 語彙への射影
-├── adam_w.rs                  # AdamW オプティマイザ
+├── adam_w.rs                  # AdamW オプティマイザ (weight decay / β2 設定可)
 ├── lr_scheduler.rs            # warmup + cosine スケジューラ
-├── cross_entropy_loss.rs
-├── bpe_tokenizer.rs           # BPE トークナイザ
+├── cross_entropy_loss.rs      # 系列全体のクロスエントロピー損失 (PAD は loss から除外)
+├── tokenizer.rs               # Tokenizer trait と TokenizerKind enum (BPE / Char の切替)
+├── bpe_tokenizer.rs           # BPE トークナイザ (byte-level + 句読点 split)
+├── char_tokenizer.rs          # 文字単位トークナイザ (vocab はコーパス文字種から自動生成)
+├── eval.rs                    # 学習中の val_loss 計測 (90/10 split + ランダム窓)
 ├── checkpoint.rs              # 重み・状態の保存/読込
 └── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
 
-corpus/
-├── tiny_shakespeare.txt       # Phase 2 / 3 用 (英語 1.1 MB)
-└── aozora_kokoro.txt          # Phase 4 用 (日本語 484 KB, 夏目漱石「こころ」)
-
 scripts/
-├── download_tiny_shakespeare.sh
-└── download_aozora_kokoro.sh  # 青空文庫 zip → UTF-8 + ルビ除去
+├── download_tiny_shakespeare.sh   # Karpathy char-rnn から取得
+└── download_aozora_kokoro.sh      # 青空文庫 zip → UTF-8 + ルビ除去 (要 python3)
+
+corpus/                            # gitignore (各種スクリプトで再生成可能)
+├── tiny_shakespeare.txt           # Phase 2 / 3 用 (英語 1.1 MB)
+└── aozora_kokoro.txt              # Phase 4 用 (日本語 484 KB, 夏目漱石「こころ」)
+
+logs/                              # gitignore (学習ログの保存先)
+└── <run_name>.log
+
+docs/                              # README から参照する図
+├── learning_rate.png
+└── lr_schedule.png
 
 checkpoints/<run_name>/
 ├── step_NNNNNN.bin            # 学習途中の checkpoint
