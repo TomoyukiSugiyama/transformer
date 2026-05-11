@@ -303,6 +303,98 @@ impl Config {
         cfg
     }
 
+    /// Phase 5-3: 明治-大正 6 作家 (~3.5-4.5M char) で学習。 モデルは Phase 5-2 と同等。
+    /// 取得スクリプト: `scripts/download_aozora_meiji_taisho.sh`
+    /// 含まれる作家: 太宰治 / 国木田独歩 / 宮沢賢治 / 中島敦 / 森鴎外 / 夏目漱石 (全て 新字新仮名)
+    ///
+    /// データが 3-4 倍に増えるので、 過学習開始 step も大幅に後ろ倒し (Phase 5-2 で 600 → 1500+ 予想)。
+    /// よって end_step を 3000 に拡張、 save_every は 200 で粒度を緩める。
+    /// 文字種は Phase 4b (3720 chars) より増える見込み (4500-5500 chars と推定)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_max512() -> Self {
+        let prompts = vec![
+            "私は",
+            "先生は",
+            "ある日",
+            "東京の",
+            "吾輩は",
+            "それから",
+            "メロスは",
+            "ジョバンニ",
+        ];
+
+        Self {
+            run_name: "phase5c_aozora_meiji_taisho_d384_n6_char_rms_swiglu_rope_max512",
+            corpus_path: "corpus/aozora_meiji_taisho.txt",
+            tokenizer_kind: TokenizerKind::Char,
+            normalization_kind: NormalizationKind::Rms,
+            feed_forward_kind: FeedForwardKind::SwiGlu,
+            positional_encoding_kind: PositionalEncodingKind::Rope,
+            d_model: 384,
+            n_heads: 6,
+            d_ff: 1536,
+            n_layers: 6,
+            max_len: 512,
+            vocab_size: 0,
+            lr_max: 1e-3,
+            lr_min: 1e-4,
+            warmup_steps: 200,
+            end_step: 3000,
+            save_every: 200,
+            log_every: 20,
+            val_every: 200,
+            val_n_batches: 16,
+            val_split_ratio: 0.05,
+            batch_size: 32,
+            dropout: 0.2,
+            weight_decay: 0.1,
+            beta2: 0.99,
+            prompts,
+        }
+    }
+
+    /// Phase 5-4a: モデル拡大 (d_model 384 → 512, ~20M params)。 コーパスは Phase 5-3 と同じ。
+    /// lr_max を 7e-4 (LLaMA 流の控えめ) に下げ、 warmup を 300 に伸ばす。
+    /// 完走時間予測 (M1 Max + Accelerate): ~5 時間 (Phase 5-3 + 1.7-2x compute)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_d512_max512() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_max512();
+        cfg.run_name = "phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512";
+        cfg.d_model = 512;
+        cfg.n_heads = 8;
+        cfg.d_ff = 2048;
+        cfg.lr_max = 7e-4;
+        cfg.lr_min = 7e-5;
+        cfg.warmup_steps = 300;
+        cfg
+    }
+
+    /// Phase 5-4b: モデル拡大 (d_model 512, n_layers 6 → 8, ~26M params)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_d512_n8_max512() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_d512_max512();
+        cfg.run_name = "phase5d_aozora_meiji_taisho_d512_n8_char_rms_swiglu_rope_max512";
+        cfg.n_layers = 8;
+        cfg
+    }
+
+    /// Phase 5-4c: モデル拡大 (d_model 768, n_layers 8, ~50M params)。
+    /// 学習時間が 10 時間級になるため batch_size を 16 に下げてメモリ余裕を確保。
+    /// lr_max を 5e-4 に下げる (GPT-2 small 124M で使われる慣例)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_d768_max512() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_d512_n8_max512();
+        cfg.run_name = "phase5d_aozora_meiji_taisho_d768_n8_char_rms_swiglu_rope_max512";
+        cfg.d_model = 768;
+        cfg.n_heads = 12;
+        cfg.d_ff = 3072;
+        cfg.batch_size = 16;
+        cfg.lr_max = 5e-4;
+        cfg.lr_min = 5e-5;
+        cfg.warmup_steps = 500;
+        cfg
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
