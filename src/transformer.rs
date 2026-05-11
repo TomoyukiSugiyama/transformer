@@ -2,16 +2,18 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 
+use crate::normalization::Normalization;
+use crate::normalization::NormalizationKind;
+use crate::normalization::load_normalization;
 use crate::{
     adam_w::AdamW,
     checkpoint::{Checkpointable, WeightMap},
-    layer_normalization::LayerNormalization,
     transformer_block::TransformerBlock,
 };
 
 pub struct Transformer {
     blocks: Vec<TransformerBlock>,
-    final_norm: LayerNormalization,
+    final_norm: Box<dyn Normalization>,
 }
 
 impl Transformer {
@@ -21,12 +23,15 @@ impl Transformer {
         n_heads: usize,
         d_ff: usize,
         dropout_p: f32,
+        normalization_kind: NormalizationKind,
     ) -> Self {
         Self {
             blocks: (0..n_layers)
-                .map(|_| TransformerBlock::new(d_model, n_heads, d_ff, dropout_p))
+                .map(|_| {
+                    TransformerBlock::new(d_model, n_heads, d_ff, dropout_p, normalization_kind)
+                })
                 .collect(),
-            final_norm: LayerNormalization::new(d_model),
+            final_norm: load_normalization(normalization_kind, d_model),
         }
     }
 

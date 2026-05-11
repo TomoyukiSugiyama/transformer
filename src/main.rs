@@ -10,7 +10,9 @@ mod language_model;
 mod layer_normalization;
 mod matrix;
 mod multi_head_attention;
+mod normalization;
 mod output_head;
+mod root_mean_square_layer_normalization;
 mod sinusoidal_pe;
 mod tokenizer;
 mod transformer;
@@ -27,8 +29,8 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
     adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
-    layer_normalization::LayerNormalization, lr_scheduler::LrScheduler,
-    multi_head_attention::MultiHeadAttention, tokenizer::TokenizerKind,
+    lr_scheduler::LrScheduler, multi_head_attention::MultiHeadAttention,
+    normalization::NormalizationKind, tokenizer::TokenizerKind,
 };
 
 /// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
@@ -57,6 +59,7 @@ struct Config {
     /// 学習・推論で読み込む corpus テキストファイルへのパス
     corpus_path: &'static str,
     tokenizer_kind: TokenizerKind,
+    normalization_kind: NormalizationKind,
     d_model: usize,
     n_heads: usize,
     d_ff: usize,
@@ -94,6 +97,7 @@ impl Config {
             run_name: "phase2_d256_ff1024_max128_with_accelerate",
             corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Bpe,
+            normalization_kind: NormalizationKind::Layer,
             d_model: 256,
             n_heads: 8,
             d_ff: 1024,
@@ -127,6 +131,7 @@ impl Config {
             run_name: "phase3_nanogpt_equiv_d384_n6_char",
             corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Char,
+            normalization_kind: NormalizationKind::Layer,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -167,6 +172,7 @@ impl Config {
             run_name: "phase4_aozora_kokoro_d384_n6_char",
             corpus_path: "corpus/aozora_kokoro.txt",
             tokenizer_kind: TokenizerKind::Char,
+            normalization_kind: NormalizationKind::Layer,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -201,9 +207,10 @@ impl Config {
         let prompts = vec!["私は", "先生は", "ある日", "東京の", "吾輩は", "それから"];
 
         Self {
-            run_name: "phase4b_aozora_soseki_works_d384_n6_char",
+            run_name: "phase4b_aozora_soseki_works_d384_n6_char_rms",
             corpus_path: "corpus/aozora_soseki_works.txt",
             tokenizer_kind: TokenizerKind::Char,
+            normalization_kind: NormalizationKind::Rms,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -241,8 +248,11 @@ fn main() {
     //
     // Phase 4b: 漱石主要長編 7 作品 (~1.21M char, Char tokenizer)
     let cfg = Config::aozora_soseki_works();
-    // training_and_inference(&cfg);
-    inference_from_checkpoint(&cfg, "checkpoints/phase4b_aozora_soseki_works_d384_n6_char/best.bin");
+    training_and_inference(&cfg);
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase4b_aozora_soseki_works_d384_n6_char/best.bin",
+    // );
 
     // Phase 4 旧 (BPE) checkpoint で推論:
     // let cfg = Config::aozora_kokoro();   // 一時的に tokenizer_kind を Bpe に変更が必要
@@ -365,8 +375,7 @@ fn run_training_loop(
         }
         if step % cfg.log_every == 0 {
             let window_elapsed = window_start.elapsed();
-            let ms_per_step =
-                window_elapsed.as_secs_f64() * 1000.0 / cfg.log_every as f64;
+            let ms_per_step = window_elapsed.as_secs_f64() * 1000.0 / cfg.log_every as f64;
             let elapsed_s = train_start.elapsed().as_secs_f64();
             let ema = ema_loss.unwrap();
             println!(
@@ -389,13 +398,8 @@ fn run_training_loop(
             window_start = Instant::now();
         }
         if val_enabled && step % cfg.val_every == 0 {
-            let val_loss = eval::compute_val_loss(
-                model,
-                val_ids,
-                chunk_len,
-                cfg.val_n_batches,
-                VAL_SEED,
-            );
+            let val_loss =
+                eval::compute_val_loss(model, val_ids, chunk_len, cfg.val_n_batches, VAL_SEED);
             let val_ppl = eval::perplexity(val_loss);
             println!(
                 "# val step={} val_loss={:.6} val_ppl={:.4}",
@@ -439,6 +443,7 @@ fn training_and_inference(cfg: &Config) {
     let mut model = LanguageModel::new(
         &train_text,
         cfg.tokenizer_kind,
+        cfg.normalization_kind,
         cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,
@@ -502,7 +507,13 @@ fn infer(model: &mut LanguageModel, prompts: &[&str]) {
         println!("\n--- prompt: {:?} ---", prompt);
         println!(
             "\n{}",
-            model.generate_top_k(prompt, max_new_token, top_k, temperature, repetition_penalty)
+            model.generate_top_k(
+                prompt,
+                max_new_token,
+                top_k,
+                temperature,
+                repetition_penalty
+            )
         );
     }
 }

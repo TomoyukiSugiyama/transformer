@@ -1,10 +1,12 @@
 use crate::FeedForwardNetwork;
-use crate::LayerNormalization;
 use crate::MultiHeadAttention;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
 use crate::dropout::Dropout;
+use crate::normalization::Normalization;
+use crate::normalization::NormalizationKind;
+use crate::normalization::load_normalization;
 
 /// Attention → Add&Norm → FFN → Add&Norm
 ///
@@ -12,23 +14,29 @@ use crate::dropout::Dropout;
 /// 2 箇所で適用する。 これは GPT-2 / nanoGPT と同じ位置取り。
 pub struct TransformerBlock {
     mha: MultiHeadAttention,
-    norm1: LayerNormalization,
+    norm1: Box<dyn Normalization>,
     drop_attn: Dropout,
     ffn: FeedForwardNetwork,
-    norm2: LayerNormalization,
+    norm2: Box<dyn Normalization>,
     drop_ffn: Dropout,
     cache_x: Vec<Vec<f32>>,
     cache_x2: Vec<Vec<f32>>,
 }
 
 impl TransformerBlock {
-    pub fn new(d_model: usize, n_heads: usize, d_ff: usize, dropout_p: f32) -> Self {
+    pub fn new(
+        d_model: usize,
+        n_heads: usize,
+        d_ff: usize,
+        dropout_p: f32,
+        normalization_kind: NormalizationKind,
+    ) -> Self {
         Self {
             mha: MultiHeadAttention::new(d_model, n_heads),
-            norm1: LayerNormalization::new(d_model),
+            norm1: load_normalization(normalization_kind, d_model),
             drop_attn: Dropout::new(dropout_p),
             ffn: FeedForwardNetwork::new(d_model, d_ff),
-            norm2: LayerNormalization::new(d_model),
+            norm2: load_normalization(normalization_kind, d_model),
             drop_ffn: Dropout::new(dropout_p),
             cache_x: Vec::new(),
             cache_x2: Vec::new(),

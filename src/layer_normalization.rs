@@ -2,6 +2,7 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 
+use crate::normalization::Normalization;
 use crate::{
     adam_w::AdamW,
     checkpoint::{Checkpointable, WeightMap},
@@ -108,6 +109,24 @@ impl LayerNormalization {
             &self.grad_gamma,
         );
         opt.step_vector(&format!("{prefix}.beta"), &mut self.beta, &self.grad_beta);
+    }
+}
+
+impl Normalization for LayerNormalization {
+    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.forward(x)
+    }
+
+    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.backward(dl_dy)
+    }
+
+    fn zero_grad(&mut self) {
+        self.zero_grad();
+    }
+
+    fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        self.apply_gradients(opt, prefix);
     }
 }
 

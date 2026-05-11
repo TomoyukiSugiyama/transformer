@@ -6,6 +6,7 @@ use crate::{
     cross_entropy_loss::CrossEntropyLoss,
     embedding::Embedding,
     multi_head_attention::causal_mask,
+    normalization::NormalizationKind,
     output_head::OutputHead,
     sinusoidal_pe::SinusoidalPE,
     tokenizer::{Tokenizer, TokenizerKind, load_tokenizer, train_tokenizer},
@@ -25,12 +26,14 @@ pub struct LanguageModel {
     n_layers: usize,
     max_len: usize,
     dropout_p: f32,
+    normalization_kind: NormalizationKind,
 }
 
 impl LanguageModel {
     pub fn new(
         corpus_text: &str,
         tokenizer_kind: TokenizerKind,
+        normalization_kind: NormalizationKind,
         vocab_size: usize,
         d_model: usize,
         n_heads: usize,
@@ -46,7 +49,14 @@ impl LanguageModel {
             tokenizer,
             embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
             pe: SinusoidalPE::new(max_len, d_model),
-            transformer: Transformer::new(n_layers, d_model, n_heads, d_ff, dropout_p),
+            transformer: Transformer::new(
+                n_layers,
+                d_model,
+                n_heads,
+                d_ff,
+                dropout_p,
+                normalization_kind,
+            ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
             n_heads,
@@ -54,6 +64,7 @@ impl LanguageModel {
             n_layers,
             max_len,
             dropout_p,
+            normalization_kind,
         }
     }
 
@@ -250,6 +261,7 @@ impl LanguageModel {
         map.insert_scalar("meta.n_layers", self.n_layers as u64);
         map.insert_scalar("meta.max_len", self.max_len as u64);
         map.insert_scalar("meta.dropout_p", self.dropout_p.to_bits() as u64);
+        map.insert_scalar("meta.normalization_kind", self.normalization_kind.as_u64());
         map.merge("tokenizer", self.tokenizer.to_weight_map());
         map.merge("embedding", self.embedding.to_weight_map());
         map.merge("transformer", self.transformer.to_weight_map());
@@ -280,6 +292,10 @@ impl LanguageModel {
             .map(|v| f32::from_bits(v as u32))
             .unwrap_or(0.0);
         let tokenizer = load_tokenizer(&map.scoped("tokenizer"))?;
+        let normalization_kind = map
+            .get_scalar("meta.normalization_kind")
+            .and_then(NormalizationKind::from_u64)
+            .unwrap_or(NormalizationKind::Layer);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
 
@@ -287,7 +303,14 @@ impl LanguageModel {
             tokenizer,
             embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
             pe: SinusoidalPE::new(max_len, d_model),
-            transformer: Transformer::new(n_layers, d_model, n_heads, d_ff, dropout_p),
+            transformer: Transformer::new(
+                n_layers,
+                d_model,
+                n_heads,
+                d_ff,
+                dropout_p,
+                normalization_kind,
+            ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
             n_heads,
@@ -295,6 +318,7 @@ impl LanguageModel {
             n_layers,
             max_len,
             dropout_p,
+            normalization_kind,
         };
 
         model.embedding.from_weight_map(&map.scoped("embedding"))?;
