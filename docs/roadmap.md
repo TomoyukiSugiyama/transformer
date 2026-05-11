@@ -22,8 +22,8 @@
 
 | 段階 | 項目 | 期待 val_ppl | 状態 |
 |------|------|-------------|------|
-| 5-1 | top-p (nucleus) sampling | 18.70 (変わらず、 体感品質改善) | 🚧 着手中 |
-| 5-2 | max_len 256 → 512 | 17.5〜18.0 | 未着手 |
+| 5-1 | top-p (nucleus) sampling | 18.84 (変わらず、 体感品質は限定的) | ✅ 完了 |
+| 5-2 | max_len 256 → 512 | 17.5〜18.0 | 🚧 学習準備完了 |
 | 5-3 | コーパス拡大 1M → 5M+ char | 15.5〜17.0 | 未着手 |
 | 5-4 | モデル拡大 d_model 384 → 512/768 | 12〜14 | 未着手 |
 
@@ -49,7 +49,7 @@ KV cache (Q/K/V の中間結果を保持) を導入すれば 1 token 生成あ�
 `O(n)` → `O(1)` 近くまで下がる。 `max_len=128` 以上の生成で大きく効く。
 
 ## 生成制御の追加
-- top-p (nucleus) sampling: [Phase 5-1](phase5.md#phase-5-1-top-p-nucleus-sampling) で着手中
+- ~~top-p (nucleus) sampling~~ → [Phase 5-1](phase5.md#phase-5-1-top-p-nucleus-sampling) で実装完了
 - 最小生成 token 数 (`min_new_tokens`)
 - bad words / banned ngrams フィルタ
 

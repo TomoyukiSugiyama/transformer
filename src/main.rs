@@ -249,29 +249,89 @@ impl Config {
         }
     }
 
+    /// Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (RoPE の真価検証用)。
+    ///
+    /// `aozora_soseki_works` から `max_len: 256 → 512`、 `batch_size: 64 → 32` (メモリ補正)
+    /// のみを変更。 1 step あたりの token 数 (max_len × batch_size = 16384) は変えず、
+    /// attention の計算量増加分 (seq² で 4x) を batch 半減でほぼ相殺。
+    ///
+    /// 期待: 段落単位 (10-20 文) の文脈が見えるようになり、 RoPE の相対位置注入が
+    /// max_len=256 時より効くため val_ppl が 17.5〜18.0 帯まで下がる可能性。
+    /// 同時に、 RoPE vs Sinusoidal の差が顕在化する場面でもある。
+    #[allow(dead_code)]
+    fn aozora_soseki_works_max512() -> Self {
+        let prompts = vec!["私は", "先生は", "ある日", "東京の", "吾輩は", "それから"];
+
+        Self {
+            run_name: "phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope_max512",
+            corpus_path: "corpus/aozora_soseki_works.txt",
+            tokenizer_kind: TokenizerKind::Char,
+            normalization_kind: NormalizationKind::Rms,
+            feed_forward_kind: FeedForwardKind::SwiGlu,
+            positional_encoding_kind: PositionalEncodingKind::Rope,
+            d_model: 384,
+            n_heads: 6,
+            d_ff: 1536,
+            n_layers: 6,
+            max_len: 512,
+            vocab_size: 0,
+            lr_max: 1e-3,
+            lr_min: 1e-4,
+            warmup_steps: 100,
+            end_step: 1500,
+            save_every: 100,
+            log_every: 20,
+            val_every: 100,
+            val_n_batches: 16,
+            val_split_ratio: 0.1,
+            batch_size: 32,
+            dropout: 0.2,
+            weight_decay: 0.1,
+            beta2: 0.99,
+            prompts,
+        }
+    }
+
+    /// Phase 5-2 副次実験: max_len=512 + Sinusoidal PE 版 (RoPE 比較用)。
+    /// `aozora_soseki_works_max512` から `positional_encoding_kind` のみを `Rope → Sinusoidal` に変更。
+    /// これで「max_len 拡張時の RoPE 効果」 を直接測定できる。
+    #[allow(dead_code)]
+    fn aozora_soseki_works_max512_sinusoidal() -> Self {
+        let mut cfg = Self::aozora_soseki_works_max512();
+        cfg.run_name = "phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_sin_max512";
+        cfg.positional_encoding_kind = PositionalEncodingKind::Sinusoidal;
+        cfg
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
 }
 fn main() {
-    // Phase 4a: 夏目漱石「こころ」 単独 (青空文庫, Char tokenizer, d_model=384, dropout=0.2)
+    // Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (RMS + SwiGLU + RoPE)
+    let cfg = Config::aozora_soseki_works_max512();
+    training_and_inference(&cfg);
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope_max512/best.bin",
+    // );
+
+    // Phase 5-2 副次実験: max_len 512 + Sinusoidal PE (RoPE 効果の直接比較)
+    // let cfg = Config::aozora_soseki_works_max512_sinusoidal();
+    // training_and_inference(&cfg);
+
+    // 過去 phase の checkpoint 推論:
+    //
+    // Phase 4b: 漱石 7 作品 RMS+SwiGLU+RoPE (max_len=256)
+    // let cfg = Config::aozora_soseki_works();
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope/best.bin",
+    // );
+    //
+    // Phase 4a: 夏目漱石「こころ」 単独
     // let cfg = Config::aozora_kokoro();
     // training_and_inference(&cfg);
-    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_char/step_000200.bin");
-
-    // 他の Config に切替えるには下記を有効化:
-    //
-    // Phase 4b: 漱石主要長編 7 作品 (~1.21M char, Char tokenizer)
-    let cfg = Config::aozora_soseki_works();
-    // training_and_inference(&cfg);
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope/best.bin",
-    );
-
-    // Phase 4 旧 (BPE) checkpoint で推論:
-    // let cfg = Config::aozora_kokoro();   // 一時的に tokenizer_kind を Bpe に変更が必要
-    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_bpe/step_000250.bin");
     //
     // Phase 3: nanoGPT 相当 char-level Tiny Shakespeare
     // let cfg = Config::nano_gpt_equivalent();
@@ -518,16 +578,29 @@ fn training_from_checkpoint(cfg: &Config, path: &str) {
 fn infer(model: &mut LanguageModel, prompts: &[&str]) {
     let max_new_token = 100;
     let top_k = 5;
+    let top_p = 0.9;
     let temperature = 1.0;
     let repetition_penalty = 1.2;
     for prompt in prompts {
-        println!("\n--- prompt: {:?} ---", prompt);
+        println!("\n=== prompt: {:?} ===", prompt);
+        println!("\n--- top-k (k={top_k}, t={temperature}, rep={repetition_penalty}) ---");
         println!(
             "\n{}",
             model.generate_top_k(
                 prompt,
                 max_new_token,
                 top_k,
+                temperature,
+                repetition_penalty
+            )
+        );
+        println!("\n--- top-p (p={top_p}, t={temperature}, rep={repetition_penalty}) ---");
+        println!(
+            "\n{}",
+            model.generate_top_p(
+                prompt,
+                max_new_token,
+                top_p,
                 temperature,
                 repetition_penalty
             )

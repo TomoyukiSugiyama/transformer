@@ -88,6 +88,60 @@ impl OutputHead {
         indexed[0].0
     }
 
+    /// top-p (nucleus) sampling の候補生成 (テスト・サンプリングで共用)。
+    ///
+    /// 累積確率が `p` を初めて超える位置までを候補として残し、 候補内で確率を再正規化する。
+    /// 戻り値の各 `(vocab_id, prob)` の prob は候補集合内の正規化済み確率で、 合計は 1.0 (浮動小数誤差除く)。
+    ///
+    /// `p = 1.0` で全候補、 `p` が極小で確信度最大の 1 候補のみが返る。
+    /// 必ず最低 1 候補を返す (空集合にならない)。
+    pub fn top_p_candidates(logits: &[f32], p: f32, temperature: f32) -> Vec<(usize, f32)> {
+        assert!(temperature > 0.0, "temperature must be > 0, got {temperature}");
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "top-p must be in [0.0, 1.0], got {p}"
+        );
+
+        let scaled: Vec<f32> = logits.iter().map(|&x| x / temperature).collect();
+        let probs = Self::softmax(&scaled);
+
+        let mut indexed: Vec<(usize, f32)> = probs.into_iter().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        // 累積確率が初めて p を超える index で打ち切り (inclusive)。
+        // p=1.0 のときは浮動小数誤差で 1.0 に達しない可能性があるので、 デフォルトで全件を残す。
+        let mut cutoff = indexed.len();
+        let mut cum = 0.0;
+        for (i, &(_, prob)) in indexed.iter().enumerate() {
+            cum += prob;
+            if cum >= p {
+                cutoff = i + 1;
+                break;
+            }
+        }
+
+        let mut kept: Vec<(usize, f32)> = indexed.into_iter().take(cutoff).collect();
+        let sum: f32 = kept.iter().map(|&(_, q)| q).sum();
+        for entry in kept.iter_mut() {
+            entry.1 /= sum;
+        }
+        kept
+    }
+
+    pub fn top_p_sample(logits: &[f32], p: f32, temperature: f32) -> usize {
+        let kept = Self::top_p_candidates(logits, p, temperature);
+        let mut rng = rng();
+        let r: f32 = rng.random_range(0.0..1.0);
+        let mut acc = 0.0;
+        for &(idx, prob) in &kept {
+            acc += prob;
+            if r < acc {
+                return idx;
+            }
+        }
+        kept[0].0
+    }
+
     /// (seq_len, d_model) → (seq_len, vocab_size)
     pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
         self.cache_hidden = Matrix::from_jagged(hidden);
@@ -114,6 +168,114 @@ impl OutputHead {
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
         opt.step_matrix_flat(&format!("{prefix}.w"), &mut self.w, &self.grad_w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// p=1.0 は全候補を残す (確率の合計が 1.0 に正規化される)。
+    #[test]
+    fn top_p_one_keeps_all_candidates() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 0.5];
+        let kept = OutputHead::top_p_candidates(&logits, 1.0, 1.0);
+        assert_eq!(kept.len(), logits.len());
+        let sum: f32 = kept.iter().map(|&(_, p)| p).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "sum should be 1.0, got {sum}");
+
+        // 元の vocab id が全て揃っているかチェック
+        let mut ids: Vec<usize> = kept.iter().map(|&(i, _)| i).collect();
+        ids.sort();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// p が極小だと top-1 のみが残り、 確率は 1.0 になる。
+    #[test]
+    fn top_p_zero_keeps_top_one() {
+        let logits = vec![1.0, 5.0, 2.0, 0.5]; // top-1 は index=1
+        let kept = OutputHead::top_p_candidates(&logits, 0.0, 1.0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, 1);
+        assert!((kept[0].1 - 1.0).abs() < 1e-6);
+    }
+
+    /// 累積確率が p を「初めて超えた」 index で打ち切る (inclusive)。
+    /// 確率が [0.5, 0.3, 0.15, 0.05] となるような logits を構成し、 p=0.7 で 2 候補だけ残るか確認。
+    #[test]
+    fn top_p_cutoff_is_inclusive_at_first_overshoot() {
+        // softmax(logits) ≈ [0.5, 0.3, 0.15, 0.05] となる logits を逆算:
+        // log(p_i / p_0) を logits 差として与える
+        let probs = [0.5_f32, 0.3, 0.15, 0.05];
+        let logits: Vec<f32> = probs.iter().map(|p| p.ln()).collect();
+
+        // p=0.7: 累積 0.5 (1 件) → 0.8 (2 件超過) で打ち切り、 残るのは 2 件
+        let kept = OutputHead::top_p_candidates(&logits, 0.7, 1.0);
+        assert_eq!(kept.len(), 2);
+        // 元 idx 0 と 1 のはず (top-2)
+        let mut kept_ids: Vec<usize> = kept.iter().map(|&(i, _)| i).collect();
+        kept_ids.sort();
+        assert_eq!(kept_ids, vec![0, 1]);
+        // 再正規化後の合計
+        let sum: f32 = kept.iter().map(|&(_, p)| p).sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+        // 比率は元の 0.5:0.3 を保つ (再正規化されただけ)
+        // 上位が 0.5/0.8 = 0.625, 次が 0.3/0.8 = 0.375
+        let top = kept.iter().find(|&&(i, _)| i == 0).unwrap().1;
+        let next = kept.iter().find(|&&(i, _)| i == 1).unwrap().1;
+        assert!((top - 0.625).abs() < 1e-5);
+        assert!((next - 0.375).abs() < 1e-5);
+    }
+
+    /// temperature が確率分布の鋭さを正しく変える:
+    /// 同じ logits でも t<1 で分布が尖り、 t>1 で平坦化する。
+    /// p を固定したとき、 t<1 では候補が減り、 t>1 では増える方向のはず。
+    #[test]
+    fn top_p_temperature_affects_distribution_sharpness() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let sharp = OutputHead::top_p_candidates(&logits, 0.9, 0.5);
+        let flat = OutputHead::top_p_candidates(&logits, 0.9, 2.0);
+        // 鋭いほど少数候補で 90% に到達、 平坦ほど多数必要
+        assert!(
+            sharp.len() <= flat.len(),
+            "sharp(t=0.5)={} flat(t=2.0)={}",
+            sharp.len(),
+            flat.len()
+        );
+        // 同じ logits で順位は保たれる: top-1 は idx=4 (logit=5.0)
+        assert_eq!(sharp[0].0, 4);
+        assert_eq!(flat[0].0, 4);
+    }
+
+    /// 浮動小数誤差で p=1.0 でも cumsum が 0.999... になっても全候補が残る。
+    #[test]
+    fn top_p_one_robust_to_float_error() {
+        let logits = vec![0.0_f32; 100]; // 一様分布
+        let kept = OutputHead::top_p_candidates(&logits, 1.0, 1.0);
+        assert_eq!(kept.len(), 100);
+        let sum: f32 = kept.iter().map(|&(_, p)| p).sum();
+        assert!((sum - 1.0).abs() < 1e-4);
+    }
+
+    /// 同じ vocab id は重複しない。
+    #[test]
+    fn top_p_returns_unique_ids() {
+        let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let kept = OutputHead::top_p_candidates(&logits, 0.8, 1.0);
+        let mut ids: Vec<usize> = kept.iter().map(|&(i, _)| i).collect();
+        let before = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "ids must be unique");
+    }
+
+    /// top_p_sample は kept 集合から id を返す。
+    #[test]
+    fn top_p_sample_returns_id_from_kept_set() {
+        let logits = vec![1.0, 10.0, 2.0]; // top-1 は idx=1 (圧倒的)
+        // p=0.5 ならほぼ確実に top-1 のみが kept になる
+        let id = OutputHead::top_p_sample(&logits, 0.5, 1.0);
+        assert_eq!(id, 1);
     }
 }
 

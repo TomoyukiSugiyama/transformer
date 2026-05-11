@@ -14,8 +14,8 @@ Phase 5 では 4 軸を **コスト順** に検証する:
 
 | 段階 | 項目 | 仮説 | 実装コスト | 学習時間 | 状態 |
 |------|------|------|-----------|---------|------|
-| 5-1 | **top-p (nucleus) sampling** | top-k=5 の保守性が品質を下げる | 1-2 時間 | なし (推論のみ) | 🚧 着手予定 |
-| 5-2 | **max_len 拡張 (256 → 512)** | 5-10 文しか見えない、 RoPE 真価検証 | 2-3 時間 | x2.5 (再学習) | 未着手 |
+| 5-1 | **top-p (nucleus) sampling** | top-k=5 の保守性が品質を下げる | 1-2 時間 | なし (推論のみ) | ✅ 完了 |
+| 5-2 | **max_len 拡張 (256 → 512)** | 5-10 文しか見えない、 RoPE 真価検証 | 2-3 時間 | x2.5 (再学習) | 🚧 学習準備完了 |
 | 5-3 | **コーパス拡大 (1M → 5M+ char)** | データ不足が奇妙な単語混入の主因 | 半日 (スクリプト) | x2 | 未着手 |
 | 5-4 | **モデル拡大 (d_model 384 → 512/768)** | 容量不足、 日本語の複雑さ | 1 時間 (Config) | x3-8 | 未着手 |
 
@@ -92,6 +92,51 @@ pub fn top_p_sample(logits: &[f32], p: f32, temperature: f32) -> usize {
 - 既存 `generate_top_k` も残す (比較用)
 - repetition_penalty は据置 (top-p と独立な機構なので影響なし)
 
+### 実装結果 (✅ 完了)
+
+[Phase 4b RMS+SwiGLU+RoPE best.bin (val_ppl 18.84, step 600)](phase_d.md#phase-d-2-rope) で同じプロンプトに対し top-k=5 と top-p=0.9 (どちらも `temperature=1.0`, `repetition_penalty=1.2`) を比較した。
+
+> RoPE checkpoint は val_ppl で SwiGLU best (18.70) にわずかに劣るが、 サンプリング戦略の比較目的にはどちらも有効。
+> Phase 5-2 で max_len 拡張を予定しているため、 そのまま乗り換えやすい RoPE 版を採用した。
+
+#### 並列出力サンプル (6 プロンプトの抜粋)
+
+| prompt | top-k=5 | top-p=0.9 |
+|--------|---------|-----------|
+| 「私は」 | 「お亡くなりましょう」 「奥さん」 「Ｋ」 → こころ調、 整然 | 「弁解しませんでした」 「迷亭が」 「博物館へ足」 → 吾輩は猫である調、 多様 |
+| 「先生は」 | 「どんな人です」 → 三四郎調、 短く平易 | 「自分ほど親しみを証明する事ができなかった」 → こころ調、 内省的 |
+| 「ある日」 | 「日露を与えた」 → 吾輩は猫である調、 「向き直りが悪い」 | 「三四郎はまだぼんやりと笑った」 「容易に帰らん」 → 三四郎調 |
+| 「吾輩は」 | 「猫の方を見た」 「不合議な顔」 (造語あり) | 「鼻子は真面目に聞くような顔付」 → 鼻子の登場で吾輩らしさ |
+| 「それから」 | 「兄さんの態度」 → こころ調、 比較的整然 | 「石鹸を落して手提げ」 → 三四郎/草枕系の混在 |
+
+#### 観察
+
+1. **語彙の多様性**: top-p が **「博物館」 「弁解」 「証明」 「鼻子」 「容易に帰らん」** などの特徴的語彙を引き出す。
+   top-k=5 では上位 5 候補に常に高頻度の汎用語 (「は」 「を」 「と」 等) が占め、 表現が均質化する傾向
+
+2. **作品判別の解像度**: 同じ prompt でも top-p では作品の特徴が出やすい (「吾輩は」 で 「鼻子」 「主人」 が登場、
+   「ある日」 で 「三四郎」 が登場)。 top-k は **どの作品か曖昧な汎用文** に流れがち
+
+3. **構文の破綻リスク**: top-p の方が文構造の破綻 (「不合議な顔」 「日露もの」 等) が **やや増える**。
+   ただし top-k でも 「お亡くなりましょう」 のような誤りはあり、 構文破綻の **主因はサンプリングではなく
+   モデル容量律速** であることを再確認
+
+4. **体感品質**: 「面白さ」 では top-p > top-k、 「整然さ」 では top-k > top-p。
+   論文 (Holtzman et al. 2019) で報告される 「人間らしい多様性」 のトレードオフが本実装でも再現
+
+#### 結論
+
+- **top-p を採用** (`infer()` のデフォルトに top-k と top-p 両方を出力)
+- **本実装での生成品質改善は限定的** ⇒ サンプリング側の最適化は概ね飽和
+- 構文の正しさ、 段落単位の一貫性は **モデル容量・コーパス・max_len の制約** が支配的
+  → **Phase 5-2 以降のスケール側改善が本丸** であることを確認
+
+#### 副次的成果
+
+- `OutputHead::top_p_candidates` を独立メソッドとして切出し、 サンプリング戦略のテスト容易性を向上
+- テスト 7 件追加: `p=1.0` で全件残存、 `p≈0` で top-1 のみ、 累積確率打切り (inclusive)、
+  temperature 効果、 浮動小数誤差耐性、 vocab id 重複なし、 sampling の正常動作
+
 ---
 
 ## Phase 5-2: max_len 拡張 (256 → 512)
@@ -109,28 +154,52 @@ pub fn top_p_sample(logits: &[f32], p: f32, temperature: f32) -> usize {
 
 ### 設定
 
-`Config::aozora_soseki_works_max512()` を新規追加:
+`Config::aozora_soseki_works_max512()` を実装済 (`src/main.rs`):
 
-| 項目 | Phase 4b (現状) | Phase 5-2 |
-|------|----------------|-----------|
+| 項目 | Phase 4b | Phase 5-2 |
+|------|---------|-----------|
+| `run_name` | `phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope` | `phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope_max512` |
 | `max_len` | 256 | **512** |
 | `batch_size` | 64 | **32** (メモリ補正) |
-| その他 | RMS + SwiGLU + RoPE | 同じ |
+| `end_step` | 2000 | **1500** (Phase 4b で 600 がピークだったので余裕を見る) |
+| `save_every` | 200 | **100** (best 検出粒度を上げる) |
+| その他 | RMS + SwiGLU + RoPE, dropout=0.2, lr 1e-3→1e-4 | 同じ |
 
-attention の計算量は `O(seq²)` なので、 seq 2 倍 → attention 4 倍 + dense 2 倍。
-batch を半分にして帳尻を合わせる ( total tokens は同じ )。
+per-step 1 token あたりの compute は `attention: O(b·h·seq²·d_head) + FFN: O(b·seq·d²)` で、
+`64·6·256² + 64·256·384·1536 ≈ 1.6e9 + 9.6e9 = 11.2e9` →
+`32·6·512² + 32·512·384·1536 ≈ 3.2e9 + 9.6e9 = 12.8e9` で **+14% の計算量増**。
+ただし step あたり token 数は `max_len × batch_size = 16384` で同じ (Phase 4b と直接比較しやすい)。
 
 ### 期待値
 
 - val_ppl: 18.84 → **17.5〜18.0** (文脈長拡大による改善)
-- per-step 時間: **2.5〜3 倍** (7700 ms → 20000-25000 ms)
-- 完走時間 (end_step=1500): 1500 × 23s ≈ **9.6 時間**
-- RoPE の効果が SwiGLU+sin-PE 比でより顕著に出る可能性
+- per-step 時間: **+14〜30%** (7700 ms → 9000〜10000 ms 程度)
+- 完走時間 (end_step=1500): 1500 × 9.5s ≈ **4 時間**
+- RoPE の効果が SwiGLU+Sinusoidal 比でより顕著に出る可能性 (副次実験で検証)
 
 ### 副次実験 (オプション)
 
-`Config::aozora_soseki_works_max512_sin_pe()` で同条件 + RoPE を Sinusoidal に戻して比較。
-これで **「max_len 拡張時の RoPE 効果」** を直接測定できる。
+`Config::aozora_soseki_works_max512_sinusoidal()` を実装済。 これも `phase5b_..._sin_max512` として
+独立 run name で並走可能。 RoPE 版が完了した後に同じ手順で実行することで
+「**max_len 拡張時の RoPE 効果**」 が直接測定できる。
+
+### 実行方法
+
+`src/main.rs` の `main()` で対応する Config を選んで `cargo run --release`:
+
+```rust
+let cfg = Config::aozora_soseki_works_max512();
+training_and_inference(&cfg);
+```
+
+ログは `logs/phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope_max512.log` に保存される想定。
+
+### 注意点
+
+- **メモリ**: M1 Max (32GB) では batch_size=32 で問題ない見込み。 attention の temp が
+  `32 × 6 × 512² × 4B ≈ 200 MB / layer` で 6 層計 1.2 GB、 activation 含めても 5 GB 以内
+- **学習の不安定化**: もし lr が大きすぎて発散したら `lr_max=5e-4` に下げる
+- **早期収束**: Phase 4b でも step 600 で peak だったので、 step 400〜800 を重点監視
 
 ---
 

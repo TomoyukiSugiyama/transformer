@@ -272,6 +272,32 @@ impl LanguageModel {
         out
     }
 
+    pub fn generate_top_p(
+        &mut self,
+        prompt_text: &str,
+        max_new_token: usize,
+        p: f32,
+        temperature: f32,
+        repetition_penalty: f32,
+    ) -> String {
+        self.set_training(false);
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
+        for _ in 0..max_new_token {
+            let ctx = self.context_window(&ids);
+            let mut logits = self.forward_ids_last(ctx);
+            apply_repetition_penalty(&mut logits, &ids, repetition_penalty);
+            let next_id = OutputHead::top_p_sample(&logits, p, temperature);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
+        }
+        let out = self.detokenize(&ids);
+        self.set_training(true);
+        out
+    }
+
     fn detokenize(&self, ids: &[usize]) -> String {
         // BPE / Char いずれの decode 実装も特殊トークン (BOS/EOS/PAD/UNK) を
         // 自身でスキップするため、 ここでは単純に全 id を渡す。
