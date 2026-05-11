@@ -3,6 +3,64 @@
 Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推論実装。
 外部 ML フレームワークに依存せず、 行列演算から自前で実装している学習用プロジェクト。
 
+## アーキテクチャ
+
+### 全体像
+
+![Decoder-Only Transformer — Full Architecture](docs/architecture-overview.png)
+
+GPT 系の **decoder-only 構成** で、 入力テキストを次のように処理する:
+
+1. **Tokenizer**: BPE (byte-level) または Char-level でトークン ID 列に変換 ([`bpe_tokenizer.rs`](src/bpe_tokenizer.rs) / [`char_tokenizer.rs`](src/char_tokenizer.rs))
+2. **Token Embedding** (vocab × d_model): 各トークン ID を密ベクトルに射影 ([`embedding.rs`](src/embedding.rs))
+3. **Positional Encoding**: 位置情報の注入を切替可能
+   - **Sinusoidal PE** ([`sinusoidal_pe.rs`](src/sinusoidal_pe.rs)) — Embedding に加算する古典方式
+   - **RoPE** ([`rope.rs`](src/rope.rs)) — Multi-Head Attention 内で **Q/K にのみ** 回転を適用 (LLaMA 系)
+4. **TransformerBlock × n_layers** ([`transformer_block.rs`](src/transformer_block.rs)): Pre-Norm 構成で MHA + FFN を積層 (詳細は後述)
+5. **Final Norm + Output Head** ([`output_head.rs`](src/output_head.rs)): d_model → vocab に射影してロジット化
+6. **Sampling** ([`output_head.rs`](src/output_head.rs)): Greedy / top-k / **top-p (nucleus)** から選択し次トークンを決定
+
+`Normalization` / `FeedForward` / `PositionalEncoding` の 3 軸は **trait + enum で切替可能** にしており、
+Config の 1 行変更で LayerNorm ↔ RMSNorm、 GELU FFN ↔ SwiGLU FFN、 Sinusoidal ↔ RoPE を入れ替えられる
+([Phase D で導入](docs/phase_d.md))。
+
+### TransformerBlock の内部
+
+![TransformerBlock — Detail | Pre-Norm Architecture](docs/transformer-block-detail.png)
+
+1 ブロック内の処理:
+
+1. **Pre-Norm**: 残差結合に入る前に正規化 ([`normalization.rs`](src/normalization.rs) / [`layer_normalization.rs`](src/layer_normalization.rs) / [`root_mean_square_layer_normalization.rs`](src/root_mean_square_layer_normalization.rs))
+2. **Multi-Head Attention** ([`multi_head_attention.rs`](src/multi_head_attention.rs)): `W_Q W_K W_V W_O` を保持し、 因果マスクで自己回帰を担保。 RoPE 使用時は Q/K を head ごとに回転
+3. **Dropout + Residual Add** ① ([`dropout.rs`](src/dropout.rs))
+4. **2 回目の Pre-Norm**
+5. **FeedForward (切替可能)**:
+   - **GELU FFN** ([`feed_forward_network.rs`](src/feed_forward_network.rs)) — Linear → GELU → Linear (古典)
+   - **SwiGLU FFN** ([`swiglu_feed_forward_network.rs`](src/swiglu_feed_forward_network.rs)) — gate/up/down の 3 行列 (LLaMA 流、 Phase D-3 で +35% per-step 高速化)
+6. **Dropout + Residual Add** ② → 出力
+
+Pre-Norm は Post-Norm に比べて **大規模モデルでの学習が安定** することが知られており、 nanoGPT/GPT-2 系と同じ採用方針。
+
+### 学習パイプライン
+
+![Training Pipeline — Optimizer / Loss / Checkpoint](docs/training-pipeline.png)
+
+1 step の処理サイクル:
+
+1. **コーパス取得 + 90/10 train-val split** ([`main.rs`](src/main.rs))
+2. **トークナイズ** (全文 1 回のみ、 後はバッチごとに窓を切り出す) ([`tokenizer.rs`](src/tokenizer.rs))
+3. **ランダム窓サンプリング**: 各 step で `batch_size` 個の `(max_len + 1)` トークン窓を取り、 [入力, 教師] に分割
+4. **Forward + Backward** ([`language_model.rs`](src/language_model.rs)): 逆伝播はチェーンルールで自前実装、 中間値をキャッシュして高速化
+5. **Gradient Clip (norm=1.0)**: 勾配爆発を防ぐ
+6. **AdamW Step** ([`adam_w.rs`](src/adam_w.rs)): m, v の 1 次/2 次モーメント + weight decay (decoupled)
+7. **LR Schedule** ([`lr_scheduler.rs`](src/lr_scheduler.rs)): warmup (線形) + cosine decay
+8. **EMA Loss Logging**: CSV 形式で標準出力に流す ([`docs/tuning.md#ログの読み方`](docs/tuning.md#ログの読み方))
+9. **Val Loss (定期)** ([`eval.rs`](src/eval.rs)): `val_every` step ごとにランダム窓 N 個で計測、 perplexity 算出
+10. **Checkpoint 保存** ([`checkpoint.rs`](src/checkpoint.rs)): `best.bin` (val 最良) + `latest.bin` (直近)
+
+損失は **クロスエントロピー (PAD は除外)** ([`cross_entropy_loss.rs`](src/cross_entropy_loss.rs))、 オプティマイザは AdamW 固定 (β1=0.9, β2=0.99 推奨)。
+LR スケジューラと AdamW の数式・実装値は [`docs/tuning.md`](docs/tuning.md) に詳述。
+
 ## ドキュメント
 
 詳細はフェーズ別・トピック別に `docs/` に整理してある:

@@ -402,7 +402,11 @@ impl Config {
 fn main() {
     // Phase 5-3: 明治-大正 6 作家 (8.3M char) + max_len 512 + RMS+SwiGLU+RoPE
     let cfg = Config::aozora_meiji_taisho_max512();
-    training_and_inference(&cfg);
+    // training_and_inference(&cfg);
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase5c_aozora_meiji_taisho_d384_n6_char_rms_swiglu_rope_max512/best.bin",
+    );
 
     // Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (✅ 完了, best val_ppl 17.76 @ step 600)
     // let cfg = Config::aozora_soseki_works_max512();
