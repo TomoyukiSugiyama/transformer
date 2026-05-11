@@ -1,5 +1,8 @@
 # 今後の改善案 / ロードマップ
 
+> 本実装と SoTA LLM (LLaMA 3 / Claude / Gemini / DeepSeek-V3) の要素別比較は
+> [`sota_comparison.md`](sota_comparison.md) を参照。 ここで挙げる future work の位置付けが分かります。
+
 ## モダンアーキテクチャの導入 (Phase D) — 完了
 
 [Phase 4b](phase4.md) で **コーパス拡大による val_ppl 改善が頭打ち** ( 18.15 → 18.98 ) になったことから、
