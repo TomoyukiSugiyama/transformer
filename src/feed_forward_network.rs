@@ -8,13 +8,14 @@ use rand::rng;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
+use crate::feed_forward::FeedForward;
 use crate::matrix::Matrix;
 
 pub struct FeedForwardNetwork {
-    w1: Matrix,    // (d_model, d_ff)
-    b1: Vec<f32>,  // (d_ff,)
-    w2: Matrix,    // (d_ff, d_model)
-    b2: Vec<f32>,  // (d_model,)
+    w1: Matrix,   // (d_model, d_ff)
+    b1: Vec<f32>, // (d_ff,)
+    w2: Matrix,   // (d_ff, d_model)
+    b2: Vec<f32>, // (d_model,)
 
     grad_w1: Matrix,
     grad_b1: Vec<f32>,
@@ -144,6 +145,24 @@ impl FeedForwardNetwork {
         opt.step_matrix_flat(&format!("{prefix}.w2"), &mut self.w2, &self.grad_w2);
         opt.step_vector(&format!("{prefix}.b1"), &mut self.b1, &self.grad_b1);
         opt.step_vector(&format!("{prefix}.b2"), &mut self.b2, &self.grad_b2);
+    }
+}
+
+impl FeedForward for FeedForwardNetwork {
+    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.forward(x)
+    }
+
+    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.backward(dl_dy)
+    }
+
+    fn zero_grad(&mut self) {
+        self.zero_grad();
+    }
+
+    fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
+        self.apply_gradients(opt, prefix);
     }
 }
 

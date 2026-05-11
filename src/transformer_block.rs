@@ -1,9 +1,11 @@
-use crate::FeedForwardNetwork;
 use crate::MultiHeadAttention;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
 use crate::dropout::Dropout;
+use crate::feed_forward::FeedForward;
+use crate::feed_forward::FeedForwardKind;
+use crate::feed_forward::load_feed_forward;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -16,7 +18,7 @@ pub struct TransformerBlock {
     mha: MultiHeadAttention,
     norm1: Box<dyn Normalization>,
     drop_attn: Dropout,
-    ffn: FeedForwardNetwork,
+    ffn: Box<dyn FeedForward>,
     norm2: Box<dyn Normalization>,
     drop_ffn: Dropout,
     cache_x: Vec<Vec<f32>>,
@@ -30,12 +32,13 @@ impl TransformerBlock {
         d_ff: usize,
         dropout_p: f32,
         normalization_kind: NormalizationKind,
+        feed_forward_kind: FeedForwardKind,
     ) -> Self {
         Self {
             mha: MultiHeadAttention::new(d_model, n_heads),
             norm1: load_normalization(normalization_kind, d_model),
             drop_attn: Dropout::new(dropout_p),
-            ffn: FeedForwardNetwork::new(d_model, d_ff),
+            ffn: load_feed_forward(feed_forward_kind, d_model, d_ff),
             norm2: load_normalization(normalization_kind, d_model),
             drop_ffn: Dropout::new(dropout_p),
             cache_x: Vec::new(),

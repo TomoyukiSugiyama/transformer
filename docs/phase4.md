@@ -66,7 +66,7 @@ train loss は 0.14 まで落ちるのに対し val_ppl は 9 倍以上に悪化
   ことと、 d_model=384 / n_layers=6 のモデル容量が **データ側ではなく容量側で律速**して
   いることを示唆 (Chinchilla 則的に言えば、 10.7M params に対し 1M tokens は学習側の余地あり)
 - 次のステップとして、 **モデル拡大** (d_model=512〜) または **アーキテクチャ刷新** (RMSNorm / SwiGLU /
-  RoPE) で val_ppl を更に押し下げる余地がある
+  RoPE) で val_ppl を更に押し下げる余地がある → 後者は [Phase D](phase_d.md) で順次検証中
 
 ## 推論サンプル (Phase 4b best.bin = step 700)
 

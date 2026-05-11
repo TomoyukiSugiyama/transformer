@@ -5,6 +5,7 @@ mod cross_entropy_loss;
 mod dropout;
 mod embedding;
 mod eval;
+mod feed_forward;
 mod feed_forward_network;
 mod language_model;
 mod layer_normalization;
@@ -14,6 +15,7 @@ mod normalization;
 mod output_head;
 mod root_mean_square_layer_normalization;
 mod sinusoidal_pe;
+mod swiglu_feed_forward_network;
 mod tokenizer;
 mod transformer;
 mod transformer_block;
@@ -28,7 +30,7 @@ use std::time::Instant;
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
-    adam_w::AdamW, feed_forward_network::FeedForwardNetwork, language_model::LanguageModel,
+    adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
     lr_scheduler::LrScheduler, multi_head_attention::MultiHeadAttention,
     normalization::NormalizationKind, tokenizer::TokenizerKind,
 };
@@ -60,6 +62,7 @@ struct Config {
     corpus_path: &'static str,
     tokenizer_kind: TokenizerKind,
     normalization_kind: NormalizationKind,
+    feed_forward_kind: FeedForwardKind,
     d_model: usize,
     n_heads: usize,
     d_ff: usize,
@@ -98,6 +101,7 @@ impl Config {
             corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Bpe,
             normalization_kind: NormalizationKind::Layer,
+            feed_forward_kind: FeedForwardKind::Gelu,
             d_model: 256,
             n_heads: 8,
             d_ff: 1024,
@@ -132,6 +136,7 @@ impl Config {
             corpus_path: "corpus/tiny_shakespeare.txt",
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Layer,
+            feed_forward_kind: FeedForwardKind::Gelu,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -173,6 +178,7 @@ impl Config {
             corpus_path: "corpus/aozora_kokoro.txt",
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Layer,
+            feed_forward_kind: FeedForwardKind::Gelu,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -207,10 +213,11 @@ impl Config {
         let prompts = vec!["私は", "先生は", "ある日", "東京の", "吾輩は", "それから"];
 
         Self {
-            run_name: "phase4b_aozora_soseki_works_d384_n6_char_rms",
+            run_name: "phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu",
             corpus_path: "corpus/aozora_soseki_works.txt",
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Rms,
+            feed_forward_kind: FeedForwardKind::SwiGlu,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -248,11 +255,11 @@ fn main() {
     //
     // Phase 4b: 漱石主要長編 7 作品 (~1.21M char, Char tokenizer)
     let cfg = Config::aozora_soseki_works();
-    training_and_inference(&cfg);
-    // inference_from_checkpoint(
-    //     &cfg,
-    //     "checkpoints/phase4b_aozora_soseki_works_d384_n6_char/best.bin",
-    // );
+    // training_and_inference(&cfg);
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase4b_aozora_soseki_works_d384_n6_char_rms/best.bin",
+    );
 
     // Phase 4 旧 (BPE) checkpoint で推論:
     // let cfg = Config::aozora_kokoro();   // 一時的に tokenizer_kind を Bpe に変更が必要
@@ -444,6 +451,7 @@ fn training_and_inference(cfg: &Config) {
         &train_text,
         cfg.tokenizer_kind,
         cfg.normalization_kind,
+        cfg.feed_forward_kind,
         cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,

@@ -6,15 +6,15 @@
 モデル容量側を強化する方向が次の改善余地。 GPT-2 (2019) ではなく **LLaMA / GPT-NeoX 系で
 標準化された改良要素**を順次取り込む計画:
 
-| 項目 | 効果 | 影響範囲 | 優先度 |
-|------|------|---------|-------|
-| **RMSNorm** | LayerNorm 比 1.2〜1.5× 高速 (mean 計算が消える)、 学習も安定 | `layer_normalization` を差し替え | ★★ (実装中) |
-| **SwiGLU FFN** | 同 params で val_ppl 5〜10% 改善が期待 | `feed_forward_network` の活性化 | ★★ |
-| **RoPE** | 位置情報を相対化、 max_len 拡張時の汎化が向上 | `sinusoidal_pe` を撤去、 MHA 内に組込 | ★★★ |
-| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | ★ |
+| 項目 | 効果 | 影響範囲 | 状態 |
+|------|------|---------|------|
+| **RMSNorm** | val_ppl -1.1% (18.98 → 18.77) / 過学習開始を 100 step 後ろ倒し / 速度差は出ず | `layer_normalization` を差し替え | ✅ 完了 ([Phase D-1](phase_d.md#phase-d-1-rmsnorm-vs-layernorm)) |
+| **SwiGLU FFN** | 同 params で val_ppl 0.5〜2% 改善が期待 | `feed_forward_network` を差し替え | ✅ 実装完了 / 学習評価予定 ([Phase D-3](phase_d.md#phase-d-3-swiglu-ffn)) |
+| **RoPE** | 位置情報を相対化、 max_len 拡張時の汎化が向上 | `sinusoidal_pe` を撤去、 MHA 内に組込 | 未着手 |
+| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | 未着手 |
 
 RMSNorm / SwiGLU は他レイヤーへの影響が小さく独立に検証できる。 RoPE は positional encoding を
-撤去するためモデル全体への影響が大きく、 最後に導入予定。
+撤去するためモデル全体への影響が大きく、 最後に導入予定。 詳細結果は [docs/phase_d.md](phase_d.md) を参照。
 
 ## 過学習の更なる抑制
 - **attention dropout の追加** ([Phase 3](phase3.md) で導入したのは residual 直前の 2 箇所のみ)。

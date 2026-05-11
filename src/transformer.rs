@@ -2,6 +2,7 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 
+use crate::feed_forward::FeedForwardKind;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -24,11 +25,19 @@ impl Transformer {
         d_ff: usize,
         dropout_p: f32,
         normalization_kind: NormalizationKind,
+        feed_forward_kind: FeedForwardKind,
     ) -> Self {
         Self {
             blocks: (0..n_layers)
                 .map(|_| {
-                    TransformerBlock::new(d_model, n_heads, d_ff, dropout_p, normalization_kind)
+                    TransformerBlock::new(
+                        d_model,
+                        n_heads,
+                        d_ff,
+                        dropout_p,
+                        normalization_kind,
+                        feed_forward_kind,
+                    )
                 })
                 .collect(),
             final_norm: load_normalization(normalization_kind, d_model),

@@ -14,7 +14,8 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 | [docs/phase2.md](docs/phase2.md) | Phase 2: Tiny Shakespeare (BPE 4k, d_model=256) ベスト推論サンプル |
 | [docs/phase3.md](docs/phase3.md) | Phase 3: nanoGPT 等価設定 (char 65, d_model=384) との直接比較・val_loss で 3.4% 上回る |
 | [docs/phase4.md](docs/phase4.md) | Phase 4: 青空文庫 / 漱石 7 作品 (char) への拡張・容量律速の観察 |
-| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (RMSNorm / SwiGLU / RoPE / KV cache 等) |
+| [docs/phase_d.md](docs/phase_d.md) | Phase D: モダンアーキテクチャ導入 (RMSNorm + SwiGLU 実装完了 / RoPE 予定) |
+| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase D 進捗 / KV cache / OpenBLAS 等) |
 
 ## 依存
 
@@ -110,6 +111,8 @@ fn main() {
 | `d_model` / `n_heads` / `d_ff` / `n_layers` | モデル構造 |
 | `max_len` | 最大コンテキスト長（位置エンコーディング上限） |
 | `vocab_size` | BPE トークナイザの語彙サイズ (Char では無視) |
+| `normalization_kind` | `NormalizationKind::Layer` / `Rms` の切替 (Phase D-1 で追加) |
+| `feed_forward_kind` | `FeedForwardKind::Gelu` / `SwiGlu` の切替 (Phase D-3 で追加) |
 | `dropout` / `weight_decay` / `beta2` | 正則化・最適化のハイパラ |
 | `lr_max` / `lr_min` / `warmup_steps` | 学習率スケジュール（warmup + cosine decay） |
 | `end_step` | 総学習ステップ数 |
@@ -125,12 +128,15 @@ fn main() {
 src/
 ├── main.rs                    # エントリ・学習ループ・Config (corpus 別プリセット)
 ├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate / val 用 forward_loss
-├── transformer.rs             # Transformer (block の積み重ね)
-├── transformer_block.rs       # 1 ブロック (MHA + FFN + LayerNorm + Dropout × 2)
+├── transformer.rs             # Transformer (block の積み重ね、 final_norm 含む)
+├── transformer_block.rs       # 1 ブロック (MHA + Norm + FFN + Norm + Dropout × 2)
 ├── multi_head_attention.rs    # マルチヘッドアテンション
+├── feed_forward.rs            # FeedForward trait + FeedForwardKind enum (Gelu / SwiGlu 切替)
 ├── feed_forward_network.rs    # 位置ごとの FFN (Linear → GELU → Linear)
+├── swiglu_feed_forward_network.rs  # SwiGLU FFN (gate/up/down 3 行列、 LLaMA 流) ※Phase D-3 で組込済
+├── normalization.rs           # Normalization trait + NormalizationKind enum (Layer / Rms 切替)
 ├── layer_normalization.rs     # Layer Normalization (γ, β 学習 + 数値安定化)
-├── root_mean_square_layer_normalization.rs # RMSNorm (γ のみ、 mean 計算なし) ※Phase D で組込予定
+├── root_mean_square_layer_normalization.rs  # RMSNorm (γ のみ、 mean 計算なし) ※Phase D-1 で組込済
 ├── dropout.rs                 # Inverted dropout (training / eval 切替)
 ├── embedding.rs               # トークン埋め込み
 ├── sinusoidal_pe.rs           # 正弦波位置エンコーディング
@@ -164,6 +170,7 @@ docs/                              # 詳細ドキュメント (本 README から
 ├── phase2.md                      # Tiny Shakespeare 推論サンプル
 ├── phase3.md                      # nanoGPT との比較
 ├── phase4.md                      # 日本語コーパスへの拡張
+├── phase_d.md                     # モダンアーキテクチャ導入 (D-1 + D-3 完了, D-2 予定)
 ├── roadmap.md                     # 今後の改善案
 ├── learning_rate.png              # tuning.md から参照
 └── lr_schedule.png                # tuning.md から参照

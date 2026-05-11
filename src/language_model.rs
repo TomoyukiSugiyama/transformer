@@ -5,6 +5,7 @@ use crate::{
     checkpoint::{Checkpointable, WeightMap},
     cross_entropy_loss::CrossEntropyLoss,
     embedding::Embedding,
+    feed_forward::FeedForwardKind,
     multi_head_attention::causal_mask,
     normalization::NormalizationKind,
     output_head::OutputHead,
@@ -27,6 +28,7 @@ pub struct LanguageModel {
     max_len: usize,
     dropout_p: f32,
     normalization_kind: NormalizationKind,
+    feed_forward_kind: FeedForwardKind,
 }
 
 impl LanguageModel {
@@ -34,6 +36,7 @@ impl LanguageModel {
         corpus_text: &str,
         tokenizer_kind: TokenizerKind,
         normalization_kind: NormalizationKind,
+        feed_forward_kind: FeedForwardKind,
         vocab_size: usize,
         d_model: usize,
         n_heads: usize,
@@ -56,6 +59,7 @@ impl LanguageModel {
                 d_ff,
                 dropout_p,
                 normalization_kind,
+                feed_forward_kind,
             ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
@@ -65,6 +69,7 @@ impl LanguageModel {
             max_len,
             dropout_p,
             normalization_kind,
+            feed_forward_kind,
         }
     }
 
@@ -262,6 +267,7 @@ impl LanguageModel {
         map.insert_scalar("meta.max_len", self.max_len as u64);
         map.insert_scalar("meta.dropout_p", self.dropout_p.to_bits() as u64);
         map.insert_scalar("meta.normalization_kind", self.normalization_kind.as_u64());
+        map.insert_scalar("meta.feed_forward_kind", self.feed_forward_kind.as_u64());
         map.merge("tokenizer", self.tokenizer.to_weight_map());
         map.merge("embedding", self.embedding.to_weight_map());
         map.merge("transformer", self.transformer.to_weight_map());
@@ -296,6 +302,10 @@ impl LanguageModel {
             .get_scalar("meta.normalization_kind")
             .and_then(NormalizationKind::from_u64)
             .unwrap_or(NormalizationKind::Layer);
+        let feed_forward_kind = map
+            .get_scalar("meta.feed_forward_kind")
+            .and_then(FeedForwardKind::from_u64)
+            .unwrap_or(FeedForwardKind::Gelu);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
 
@@ -310,6 +320,7 @@ impl LanguageModel {
                 d_ff,
                 dropout_p,
                 normalization_kind,
+                feed_forward_kind,
             ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
@@ -319,6 +330,7 @@ impl LanguageModel {
             max_len,
             dropout_p,
             normalization_kind,
+            feed_forward_kind,
         };
 
         model.embedding.from_weight_map(&map.scoped("embedding"))?;
