@@ -400,9 +400,12 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (RMS + SwiGLU + RoPE)
-    let cfg = Config::aozora_soseki_works_max512();
+    // Phase 5-3: 明治-大正 6 作家 (8.3M char) + max_len 512 + RMS+SwiGLU+RoPE
+    let cfg = Config::aozora_meiji_taisho_max512();
     training_and_inference(&cfg);
+
+    // Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (✅ 完了, best val_ppl 17.76 @ step 600)
+    // let cfg = Config::aozora_soseki_works_max512();
     // inference_from_checkpoint(
     //     &cfg,
     //     "checkpoints/phase5b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope_max512/best.bin",
@@ -410,7 +413,11 @@ fn main() {
 
     // Phase 5-2 副次実験: max_len 512 + Sinusoidal PE (RoPE 効果の直接比較)
     // let cfg = Config::aozora_soseki_works_max512_sinusoidal();
-    // training_and_inference(&cfg);
+
+    // Phase 5-4a/b/c: モデル拡大 (Phase 5-3 完了後)
+    // let cfg = Config::aozora_meiji_taisho_d512_max512();      // 5-4a (~20M params)
+    // let cfg = Config::aozora_meiji_taisho_d512_n8_max512();   // 5-4b (~26M params)
+    // let cfg = Config::aozora_meiji_taisho_d768_max512();      // 5-4c (~50M params)
 
     // 過去 phase の checkpoint 推論:
     //
@@ -423,15 +430,12 @@ fn main() {
     //
     // Phase 4a: 夏目漱石「こころ」 単独
     // let cfg = Config::aozora_kokoro();
-    // training_and_inference(&cfg);
     //
     // Phase 3: nanoGPT 相当 char-level Tiny Shakespeare
     // let cfg = Config::nano_gpt_equivalent();
-    // inference_from_checkpoint(&cfg, "checkpoints/phase3_nanogpt_equiv_d384_n6_char/step_001000.bin");
     //
     // Phase 2: BPE Tiny Shakespeare
     // let cfg = Config::tiny_shakespeare();
-    // inference_from_checkpoint(&cfg, "checkpoints/phase2_d256_ff1024_max128_with_accelerate/step_002500.bin");
 }
 
 #[allow(dead_code)]
