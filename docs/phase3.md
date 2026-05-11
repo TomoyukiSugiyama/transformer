@@ -159,10 +159,18 @@ step あたり約 17 倍遅いが、 これは:
 
 ## この checkpoint からの推論方法
 
+> **重要**: `checkpoints/` は `.gitignore` 対象なので、 リポジトリには含まれていません。
+> 推論するには **先に同 Config で `training_and_inference` を完走させて** checkpoint を
+> 自前で生成する必要があります。 詳細は [README の checkpoint 運用](../README.md#checkpoint-から再開推論) を参照。
+
 ```rust
 // src/main.rs
 fn main() {
     let cfg = Config::nano_gpt_equivalent();
+    // 1) まず学習を完走させて checkpoints/<run_name>/step_001000.bin 等を生成:
+    // training_and_inference(&cfg);
+
+    // 2) 完走後にこちらに切替えて推論のみを実行:
     inference_from_checkpoint(
         &cfg,
         "checkpoints/phase3_nanogpt_equiv_d384_n6_char/step_001000.bin",

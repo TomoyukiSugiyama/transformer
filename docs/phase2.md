@@ -92,10 +92,18 @@ i have a soldier
 
 ## この checkpoint からの推論方法
 
+> **重要**: `checkpoints/` は `.gitignore` 対象なので、 リポジトリには含まれていません。
+> 推論するには **先に同 Config で `training_and_inference` を完走させて** checkpoint を
+> 自前で生成する必要があります。 詳細は [README の checkpoint 運用](../README.md#checkpoint-から再開推論) を参照。
+
 ```rust
 // src/main.rs
 fn main() {
     let cfg = Config::tiny_shakespeare();
+    // 1) まず学習を完走させて checkpoints/<run_name>/best.bin を生成:
+    // training_and_inference(&cfg);
+
+    // 2) 完走後にこちらに切替えて推論のみを実行:
     inference_from_checkpoint(
         &cfg,
         "checkpoints/phase2_d256_ff1024_max128_with_accelerate/step_002500.bin",

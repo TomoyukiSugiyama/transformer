@@ -416,12 +416,16 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 
 ## 実行コマンド早見表
 
-| 段階 | コマンド |
-|------|----------|
-| 5-1 推論 (今すぐ実行可) | `cargo run --release` (`main()` を `Config::aozora_soseki_works()` + `inference_from_checkpoint()` に切替) |
-| 5-2 学習 | `main()` で `Config::aozora_soseki_works_max512()` + `training_and_inference()` を有効化 → `cargo run --release` |
-| 5-3 データ取得 | `./scripts/download_aozora_meiji_taisho.sh` (5-15 分) |
-| 5-3 学習 | `main()` で `Config::aozora_meiji_taisho_max512()` を有効化 → `cargo run --release` |
-| 5-4a 学習 | `main()` で `Config::aozora_meiji_taisho_d512_max512()` を有効化 → `cargo run --release` |
-| 5-4b 学習 | `main()` で `Config::aozora_meiji_taisho_d512_n8_max512()` を有効化 |
-| 5-4c 学習 | `main()` で `Config::aozora_meiji_taisho_d768_max512()` を有効化 |
+> **重要**: `checkpoints/` は `.gitignore` 対象のため、 推論コマンド (`inference_from_checkpoint`)
+> はその checkpoint を生成した学習を **事前に完走** している必要があります。
+> 初回は必ず学習 (`training_and_inference`) から開始してください。
+
+| 段階 | 前提 | コマンド |
+|------|------|---------|
+| 5-1 推論 (top-k vs top-p 比較) | Phase 4b の `best.bin` が存在 | `main()` を `Config::aozora_soseki_works()` + `inference_from_checkpoint(..., ".../best.bin")` に切替 → `cargo run --release` |
+| 5-2 学習 | コーパス `aozora_soseki_works.txt` がある | `main()` で `Config::aozora_soseki_works_max512()` + `training_and_inference()` → `cargo run --release` |
+| 5-3 データ取得 | python3, curl, unzip | `./scripts/download_aozora_meiji_taisho.sh` (約 2 分) |
+| 5-3 学習 | コーパス `aozora_meiji_taisho.txt` がある | `main()` で `Config::aozora_meiji_taisho_max512()` を有効化 → `cargo run --release` |
+| 5-4a 学習 | Phase 5-3 と同じコーパス | `main()` で `Config::aozora_meiji_taisho_d512_max512()` |
+| 5-4b 学習 | 〃 | `main()` で `Config::aozora_meiji_taisho_d512_n8_max512()` |
+| 5-4c 学習 | 〃 | `main()` で `Config::aozora_meiji_taisho_d768_max512()` |

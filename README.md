@@ -85,27 +85,37 @@ grep -E '^(step,|[0-9]+,)' train.log > train.csv
 
 ### checkpoint から再開・推論
 
-`src/main.rs` の `main()` 内で対応する関数の呼び出しを切り替える:
+> **重要 (学習済みファイルは未配布)**: `checkpoints/`・`corpus/`・`logs/`・`*.log` は
+> `.gitignore` 対象のため、 リポジトリには含まれていません。 推論や再開を行うには
+> **まず `cargo run --release` で学習を完走させて** checkpoint
+> (`best.bin` / `latest.bin` / `step_NNNNNN.bin`) を自前で生成する必要があります。
+
+学習完走後、 `src/main.rs` の `main()` 内で対応する関数の呼び出しを切り替えます:
 
 ```rust
 fn main() {
     // 学習対象の Config を選ぶ (corpus_path はそれぞれの Config 内で固定)
     let cfg = Config::aozora_kokoro();    // または ::nano_gpt_equivalent() / ::tiny_shakespeare()
 
-    // 新規学習
+    // 新規学習 (初回はこれだけ)。 完走すると checkpoints/<run_name>/ 配下に
+    //   - best.bin: val_loss 最良時の重み
+    //   - latest.bin / step_NNNNNN.bin: 各 step 末の重み + optimizer 状態
+    //   - inference.bin: 学習完了後の推論専用 (weight のみ、 軽量)
+    // が出力される。
     training_and_inference(&cfg);
 
-    // checkpoint から再開（同じモデル構造の checkpoint のみ）
+    // 学習を途中再開 (上記で生成された latest.bin が必要)
     // training_from_checkpoint(&cfg, "checkpoints/<run_name>/latest.bin");
 
-    // checkpoint を読み込んで推論のみ
-    // inference_from_checkpoint(&cfg, "checkpoints/<run_name>/inference.bin");
+    // 学習済みモデルで推論のみ (上記で生成された best.bin / inference.bin が必要)
+    // inference_from_checkpoint(&cfg, "checkpoints/<run_name>/best.bin");
 }
 ```
 
 `training_from_checkpoint` で再開する場合、 checkpoint の `d_model` / `n_heads` / `d_ff` /
-`n_layers` / `vocab_size` が `Config` と一致している必要がある。 構造を変えた場合は
-`training_and_inference` (fresh start) を使う。
+`n_layers` / `vocab_size` が `Config` と一致している必要があります (構造を変えた場合は
+`training_and_inference` で fresh start)。 `inference_from_checkpoint` は重みのみ読込なので、
+optimizer 状態は不要 (`best.bin` または `inference.bin` のどちらでも可)。
 
 ## 設定
 

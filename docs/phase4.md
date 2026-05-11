@@ -106,10 +106,18 @@ train loss は 0.14 まで落ちるのに対し val_ppl は 9 倍以上に悪化
 
 ## この checkpoint からの推論方法
 
+> **重要**: `checkpoints/` は `.gitignore` 対象なので、 リポジトリには含まれていません。
+> 推論するには **先に同 Config で `training_and_inference` を完走させて** checkpoint を
+> 自前で生成する必要があります。 詳細は [README の checkpoint 運用](../README.md#checkpoint-から再開推論) を参照。
+
 ```rust
 // src/main.rs
 fn main() {
     let cfg = Config::aozora_soseki_works();
+    // 1) まず学習を完走させて checkpoints/<run_name>/best.bin を生成:
+    // training_and_inference(&cfg);
+
+    // 2) 完走後にこちらに切替えて推論のみを実行:
     inference_from_checkpoint(
         &cfg,
         "checkpoints/phase4b_aozora_soseki_works_d384_n6_char/best.bin",
