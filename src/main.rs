@@ -233,15 +233,17 @@ impl Config {
 }
 fn main() {
     // Phase 4a: 夏目漱石「こころ」 単独 (青空文庫, Char tokenizer, d_model=384, dropout=0.2)
-    let cfg = Config::aozora_kokoro();
-    training_and_inference(&cfg);
+    // let cfg = Config::aozora_kokoro();
+    // training_and_inference(&cfg);
+    // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_char/step_000200.bin");
 
     // 他の Config に切替えるには下記を有効化:
     //
     // Phase 4b: 漱石主要長編 7 作品 (~1.21M char, Char tokenizer)
-    // let cfg = Config::aozora_soseki_works();
+    let cfg = Config::aozora_soseki_works();
     // training_and_inference(&cfg);
-    //
+    inference_from_checkpoint(&cfg, "checkpoints/phase4b_aozora_soseki_works_d384_n6_char/best.bin");
+
     // Phase 4 旧 (BPE) checkpoint で推論:
     // let cfg = Config::aozora_kokoro();   // 一時的に tokenizer_kind を Bpe に変更が必要
     // inference_from_checkpoint(&cfg, "checkpoints/phase4_aozora_kokoro_d384_n6_bpe/step_000250.bin");
@@ -288,6 +290,9 @@ fn run_training_loop(
 
     let val_enabled = cfg.val_every > 0 && val_ids.len() > chunk_len;
     const VAL_SEED: u64 = 12345;
+    // val_loss の最小値を追跡し、 更新時に `best.bin` を保存する。
+    // None のとき初回計測 = 自動で best として保存される。
+    let mut best_val_loss: Option<f32> = None;
 
     println!("# run_name={}", cfg.run_name);
     println!(
@@ -324,7 +329,7 @@ fn run_training_loop(
         cfg.val_every,
         cfg.val_n_batches,
     );
-    println!("step,loss,ema,min,max,lr,ms_per_step,elapsed_s");
+    println!("step,loss,ema,min,max,ppl,ema_ppl,lr,ms_per_step,elapsed_s");
 
     let train_start = Instant::now();
     let mut window_start = Instant::now();
@@ -363,13 +368,16 @@ fn run_training_loop(
             let ms_per_step =
                 window_elapsed.as_secs_f64() * 1000.0 / cfg.log_every as f64;
             let elapsed_s = train_start.elapsed().as_secs_f64();
+            let ema = ema_loss.unwrap();
             println!(
-                "{},{:.6},{:.6},{:.6},{:.6},{:.3e},{:.1},{:.1}",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.4},{:.4},{:.3e},{:.1},{:.1}",
                 step,
                 avg_loss,
-                ema_loss.unwrap(),
+                ema,
                 window_min,
                 window_max,
+                eval::perplexity(avg_loss),
+                eval::perplexity(ema),
                 lr,
                 ms_per_step,
                 elapsed_s,
@@ -394,6 +402,24 @@ fn run_training_loop(
                 step, val_loss, val_ppl
             );
             let _ = std::io::stdout().flush();
+
+            // val_loss が改善 (= 過去最小を更新) したら best.bin を保存
+            let is_best = best_val_loss.map_or(true, |prev| val_loss < prev);
+            if is_best {
+                let prev_repr = best_val_loss
+                    .map(|p| format!("{:.6}", p))
+                    .unwrap_or_else(|| "(none)".to_string());
+                best_val_loss = Some(val_loss);
+                let best_path = format!("{ckpt_dir}/best.bin");
+                model
+                    .save_training_checkpoint(&best_path, opt, step)
+                    .unwrap();
+                println!(
+                    "# best updated: step={} val_loss={:.6} val_ppl={:.4} (prev val_loss={}) -> saved {}",
+                    step, val_loss, val_ppl, prev_repr, best_path
+                );
+                let _ = std::io::stdout().flush();
+            }
         }
         if step % cfg.save_every == 0 {
             let path = format!("{ckpt_dir}/step_{step:06}.bin");
