@@ -13,7 +13,9 @@ mod matrix;
 mod multi_head_attention;
 mod normalization;
 mod output_head;
+mod positional_encoding;
 mod root_mean_square_layer_normalization;
+mod rope;
 mod sinusoidal_pe;
 mod swiglu_feed_forward_network;
 mod tokenizer;
@@ -32,7 +34,8 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use crate::{
     adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
     lr_scheduler::LrScheduler, multi_head_attention::MultiHeadAttention,
-    normalization::NormalizationKind, tokenizer::TokenizerKind,
+    normalization::NormalizationKind, positional_encoding::PositionalEncodingKind,
+    tokenizer::TokenizerKind,
 };
 
 /// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
@@ -63,6 +66,7 @@ struct Config {
     tokenizer_kind: TokenizerKind,
     normalization_kind: NormalizationKind,
     feed_forward_kind: FeedForwardKind,
+    positional_encoding_kind: PositionalEncodingKind,
     d_model: usize,
     n_heads: usize,
     d_ff: usize,
@@ -102,6 +106,7 @@ impl Config {
             tokenizer_kind: TokenizerKind::Bpe,
             normalization_kind: NormalizationKind::Layer,
             feed_forward_kind: FeedForwardKind::Gelu,
+            positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 256,
             n_heads: 8,
             d_ff: 1024,
@@ -137,6 +142,7 @@ impl Config {
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Layer,
             feed_forward_kind: FeedForwardKind::Gelu,
+            positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -179,6 +185,7 @@ impl Config {
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Layer,
             feed_forward_kind: FeedForwardKind::Gelu,
+            positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -213,11 +220,12 @@ impl Config {
         let prompts = vec!["私は", "先生は", "ある日", "東京の", "吾輩は", "それから"];
 
         Self {
-            run_name: "phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu",
+            run_name: "phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope",
             corpus_path: "corpus/aozora_soseki_works.txt",
             tokenizer_kind: TokenizerKind::Char,
             normalization_kind: NormalizationKind::Rms,
             feed_forward_kind: FeedForwardKind::SwiGlu,
+            positional_encoding_kind: PositionalEncodingKind::Rope,
             d_model: 384,
             n_heads: 6,
             d_ff: 1536,
@@ -258,7 +266,7 @@ fn main() {
     // training_and_inference(&cfg);
     inference_from_checkpoint(
         &cfg,
-        "checkpoints/phase4b_aozora_soseki_works_d384_n6_char_rms/best.bin",
+        "checkpoints/phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope/best.bin",
     );
 
     // Phase 4 旧 (BPE) checkpoint で推論:
@@ -452,6 +460,7 @@ fn training_and_inference(cfg: &Config) {
         cfg.tokenizer_kind,
         cfg.normalization_kind,
         cfg.feed_forward_kind,
+        cfg.positional_encoding_kind,
         cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,

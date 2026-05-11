@@ -9,6 +9,7 @@ use crate::feed_forward::load_feed_forward;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
+use crate::rope::Rope;
 
 /// Attention → Add&Norm → FFN → Add&Norm
 ///
@@ -33,9 +34,10 @@ impl TransformerBlock {
         dropout_p: f32,
         normalization_kind: NormalizationKind,
         feed_forward_kind: FeedForwardKind,
+        rope: Option<Rope>,
     ) -> Self {
         Self {
-            mha: MultiHeadAttention::new(d_model, n_heads),
+            mha: MultiHeadAttention::new(d_model, n_heads, rope),
             norm1: load_normalization(normalization_kind, d_model),
             drop_attn: Dropout::new(dropout_p),
             ffn: load_feed_forward(feed_forward_kind, d_model, d_ff),

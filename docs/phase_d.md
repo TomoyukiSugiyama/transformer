@@ -9,8 +9,8 @@
 | 段階 | 項目 | 状態 | best val_ppl への効果 |
 |------|------|------|----------------------|
 | D-1 | RMSNorm | ✅ 完了 | 18.98 → **18.77** (-1.1%) + ピーク 100 step 後ろ倒し (過学習耐性向上) |
-| D-3 | SwiGLU FFN | ✅ 実装完了 / 学習評価予定 | (測定予定: RMSNorm + SwiGLU 統合構成で評価) |
-| D-2 | RoPE | 未着手 | (測定予定) |
+| D-3 | SwiGLU FFN | ✅ 完了 | 18.77 → **18.70** (-0.4%) + ms/step **-35%** + best 到達 **200 step 早期化** |
+| D-2 | RoPE | 🚧 学習中 (~step 600) | early step で val_ppl **-10〜22%** の劇的な収束加速 (詳細は下節) |
 | D-4 | MQA / GQA | 未着手 | 推論速度のみ、 val_ppl 影響は小 |
 
 順序が D-1 → D-3 → D-2 になっているのは:
@@ -166,25 +166,199 @@ LLaMA / PaLM / Mistral など現代主要モデルは標準採用。
 fixed weights forward、 d_ff_g 計算、 中心差分での数値勾配チェック、 checkpoint roundtrip ) を
 追加して、 LayerNorm 系で発生したような数式バグを事前に防いだ。
 
-### 学習評価予定
+### 学習評価結果
 
 `Config::aozora_soseki_works()` を **RMSNorm + SwiGLU** に切替えた `phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu`
-で評価予定。 RMSNorm 単独 (best val_ppl 18.77) からの改善幅を測定する。
+で評価。 設定は RMSNorm 単独試験と完全同一 ( `feed_forward_kind` のみ `Gelu` → `SwiGlu` に変更 )。
 
-期待値:
-- 論文 (Shazeer 2020) では perplexity 0.5-2% の改善が報告されている (param-matched 比較)
-- RMSNorm との組合せで val_ppl が 18.5 前後まで押し下げられる可能性
-- per-step 時間は matmul 1 個増加分 +5〜10% を予想
+#### val_loss / val_ppl 推移 (3 構成比較)
+
+| step | LayerNorm + GELU | RMSNorm + GELU | **RMSNorm + SwiGLU** | vs LN | vs RMS |
+|------|------------------|----------------|----------------------|-------|--------|
+| 100  | 49.12 | 48.51 | **48.12** | -2.0% | -0.8% |
+| 200  | 30.58 | 30.27 | **29.52** | -3.5% | -2.5% |
+| 300  | 24.37 | 24.07 | **23.18** | -4.9% | -3.7% |
+| 400  | 21.30 | 21.22 | **20.28** | -4.8% | -4.4% |
+| 500  | 20.17 | 20.11 | **19.64** | -2.6% | -2.3% |
+| **600**  | 19.24 | 18.93 | **18.70 ★** | **-2.8%** | **-1.2%** |
+| 700  | 18.98 ★ | 19.00 | 18.76 | -1.2% | -1.3% |
+| 800  | 19.33 | 18.77 ★ | 19.10 (overfit) | — | — |
+| 900  | — | 19.48 | 19.94 | — | — |
+| 1000 | — | 19.95 | 21.15 | — | — |
+
+#### 速度・収束効率
+
+| 指標 | LayerNorm + GELU | RMSNorm + GELU | RMSNorm + SwiGLU |
+|---|---|---|---|
+| best val_ppl | 18.98 | 18.77 | **18.70** |
+| best step | 700 | 800 | **600** |
+| best 到達時間 | 7440s (2h 4m) | 8540s (2h 22m) | **4370s (1h 13m)** ⚡ |
+| ms_per_step (steady) | ~10800 ms | ~11000 ms | **~7400 ms** ⚡ |
+| 過学習開始 step | 800 | 900 | 700 |
+
+**観察**:
+1. **best val_ppl の改善幅は控えめ** (-0.4% 対 RMSNorm)。 論文 (Shazeer 2020) の報告 0.5〜2% と整合
+2. **速度改善が予想を覆して大きい**: 当初 「matmul +1 個で +5〜10% 遅くなる」 と予想していたが、 **逆に 35% 高速化**
+   - SwiGLU は `d_ff_g = 1024 < d_ff = 1536` で 1 個あたりの matmul が小さい (cache friendly)
+   - `bias add` が無く、 `Swish (sigmoid)` が `GELU (erf)` より計算が単純
+   - 結果として 3 matmul の合計時間 < 2 matmul + bias + GELU
+3. **best 到達時間の総合短縮 -41%** (LN baseline 比 7440s → 4370s)。 SwiGLU 採用の **最大の価値はここ**
+4. **過学習が早く来る** (step 700 vs RMSNorm 900) のは表現力アップによる副作用。 dropout / weight_decay の再チューニング余地あり
+
+### 推論サンプル (RMSNorm + SwiGLU best.bin = step 600)
+
+`top_k=5, temperature=1.0, repetition_penalty=1.2, max_new_token=100` で生成:
+
+```
+[prompt: 私は]
+私はすぐ立っているのだから、それを断わなければならない。そこで私はあまり安心したと
+見えていると同じ事に思われていた。
+　奥さんは自分の前に坐っていました。そうしてお嬢さんが帰りました。
+
+[prompt: 先生は]
+先生は、私がそんなに心配した事をいうと、私の顔を見て、「あれほど」と答えている。
+奥さんの方から見るより外に私の顔に関するのだろう。
+「奥さまもお気が悪くったね。今度は奥さんに何の意味もあったのよ。私にはあな
+
+[prompt: ある日]
+ある日かも知れない。
+　三四郎は与次郎にとったが、この時はじめて来ますか」
+「そうさな。あんなにしろお会いなさらなけりゃ、まだよろしくないと言ったが、
+どうしても借金を借せずに行ったものですね。なぜ」と言って
+
+[prompt: 吾輩は]
+吾輩は大に感服のために、主人がそこへ行って見るところを見てもらわからず主人の方を
+見せようとしなければならぬ。「いや御令嬢さん」と迷亭先生の顔を見て
+「おやちょっと御馳走を願いますからね……」
+　迷亭が口の中へ
+```
+
+**定性評価**:
+- **作品判別が更に明確化**: 「吾輩は」 prompt から **迷亭先生 / 主人** (「吾輩は猫である」 固有) が初めて出現
+- 「三四郎」 prompt → 三四郎・与次郎、 「私は」/「先生は」 prompt → 奥さん・お嬢さん で適切な作品スタイル
+- 鉤括弧構造、 段落先頭全角空白、 漱石らしい敬語が安定。 Phase D-1 step 800 サンプルと比較しても遜色なし
+
+### 結論
+
+- ✅ **品質**: わずかに改善 (val_ppl -0.4%、 LayerNorm baseline 比 -1.5%)
+- ✅ **速度**: **大幅高速化** (per-step -35%、 best 到達時間 -41%)
+- ❌ **過学習耐性**: SwiGLU の表現力アップで dropout=0.2 では抑え切れず、 過学習が早期化
+- 採用判定: **採用**。 学習効率の改善が圧倒的で、 後段の Phase D 実験を半分の時間で回せる効果が大きい
+
+### 実装メモ
+
+- `src/swiglu_feed_forward_network.rs` に `SwiGluFeedForwardNetwork` 構造体
+- `src/feed_forward.rs` に `FeedForward` trait + `FeedForwardKind` enum + factory (Normalization と同パターン)
+- `Box<dyn FeedForward>` で TransformerBlock 内の FFN を統一
+- `LanguageModel` の `meta.feed_forward_kind` を checkpoint に保存・復元、 旧 ckpt は `Gelu` fallback
+
+実装上のポイント:
+- `d_ff_g = (d_ff × 2) / 3` で param-matched にする (3 行列 × 1024 ≈ 2 行列 × 1536)
+- bias なし (LLaMA 流)。 これが実は**速度改善の隠れた要因**
+- backward の `dl_dgate = (dl_da ⊙ up) ⊙ Swish'(gate)` で `Swish'` の適用順序ミスに注意
+- 数値勾配チェック (中心差分) が backward の数式バグを防ぐ唯一の手段
 
 ---
 
-## Phase D-2: RoPE (未着手)
+## Phase D-2: RoPE (学習中)
 
-(後日記載)
+論文: Su et al. 2021 ["RoFormer: Enhanced Transformer with Rotary Position Embedding"](https://arxiv.org/abs/2104.09864)。
+LLaMA / PaLM / Mistral / GPT-NeoX が標準採用。 attention の Q, K に位置 m に応じた **回転** を掛けることで、
+内積 `<Q'(m), K'(n)>` が **相対位置 `(m-n)` のみに依存**する性質を持たせる。
+
+### 実装
+
+- `src/rope.rs` に `Rope` 構造体 (cos/sin テーブル precompute + `apply_in_place` / `apply_backward_in_place`)
+- `src/positional_encoding.rs` に `PositionalEncodingKind` enum (`Sinusoidal` / `Rope`)
+- `MultiHeadAttention` に `rope: Option<Rope>` フィールド追加、 forward で Q, K のみ回転 (V には掛けない)、
+  backward では cache の未回転 Q, K を再回転して attention backward を通し、 dl_dQ/dl_dK には逆回転を適用
+- `LanguageModel` の `pe: Option<SinusoidalPE>` 化、 RoPE 選択時は埋め込み素通し
+- `meta.positional_encoding_kind` を checkpoint に保存、 旧 ckpt は `Sinusoidal` fallback
+- 2 次元ペアの取り方は **インターリーブ式** ( `(x_0,x_1), (x_2,x_3), ...` ) を採用 (LLaMA 半分割式より直感的)
+
+### 設定
+
+`Config::aozora_soseki_works()` を **RMSNorm + SwiGLU + RoPE** に切替え (`feed_forward_kind`, `normalization_kind` は据置)。
+RoPE base = 10000.0 (LLaMA 公式値)。 run_name は `phase4b_aozora_soseki_works_d384_n6_char_rms_swiglu_rope`。
+
+### テスト (`src/rope.rs` 内蔵 6 ケース、 すべて pass)
+
+| テスト | 確認内容 |
+|---|---|
+| `position_zero_is_identity` | 位置 0 で恒等変換 |
+| `rotation_preserves_norm` | 回転は等長変換 ( \|rotate(x)\| == \|x\| ) |
+| `forward_then_backward_is_identity` | `R^T · R = I` (逆回転 = 転置) |
+| `relative_position_invariance` | **`<rotate(q,m), rotate(k,n)>` が `(m-n)` のみ依存** ★中核性質 |
+| `precomputed_tables_match_formula` | cos/sin テーブルが `cos(mθ_i), sin(mθ_i)` と一致 |
+| `backward_matches_numerical_gradient` | 中心差分による解析勾配の検証 (1e-3) |
+
+### val_loss / val_ppl 推移 (4 構成比較、 step 600 まで)
+
+| step | LN + GELU | RMS + GELU | RMS + SwiGLU | **RMS + SwiGLU + RoPE** | vs SwiGLU |
+|------|-----------|------------|--------------|-------------------------|-----------|
+| 100  | 49.12 | 48.51 | 48.12 | **37.54** | **-22.0%** ⚡ |
+| 200  | 30.58 | 30.27 | 29.52 | **23.85** | **-19.2%** ⚡ |
+| 300  | 24.37 | 24.07 | 23.18 | **20.67** | **-10.8%** ⚡ |
+| 400  | 21.30 | 21.22 | 20.28 | **19.05** | -6.1% |
+| 500  | 20.17 | 20.11 | 19.64 | 19.15 | -2.5% |
+| **600** | 19.24 | 18.93 | **18.70 ★** | **18.84 ★ (進行中)** | +0.7% |
+
+(step 700 以降は学習継続中)
+
+### 速度比較 (M1 Max, steady state)
+
+| 構成 | ms_per_step | vs SwiGLU |
+|------|-------------|-----------|
+| RMS + GELU | ~11000 ms | +50% |
+| RMS + SwiGLU | ~7400 ms | baseline |
+| **RMS + SwiGLU + RoPE** | **~7700 ms** | **+4%** |
+
+RoPE の per-step overhead は **+4%** 程度。 各 layer で Q, K への 4 乗算 + 2 加算が `seq × d_head / 2` 回追加されるが、
+matmul 主体の計算量に対し十分小さい。 事前予想 `+5〜10%` の下端で済んだ。
+
+### 観察 (進行中の知見)
+
+1. **収束加速が劇的** (early step で -10〜22%): RoPE の **相対位置を直接 attention に注入する** 効果が、
+   sinusoidal PE が「埋め込みに加算して各層で間接的に学習する」 方式より効率的。
+   論文では「同 floor に早く到達」 と報告されているが、 ここまで顕著な差は予想を超えた
+
+2. **floor の差は小さい** (step 500-600 で SwiGLU と ~0-1% 差に収束): 最終的な val_ppl の改善幅は
+   論文値 ( `+0〜0.5%` ) と整合的。 RoPE の真価は **収束速度** であり floor を押し下げる効果は控えめ
+
+3. **non-monotonic な val_ppl 変動が再現** (step 400 → 500 で一時悪化、 step 600 で更新): D-1 RMSNorm でも
+   見られた 「内部表現の再構築過程」 と推定される 200 step ピッチの揺らぎ。 真の best 判定には step 800-900 まで待つ必要
+
+4. **過学習開始は未確認** (step 600 時点で train ema_ppl 10.31、 val_ppl 18.84 で gap 拡大中だが val はまだ下降)
+
+5. **推論サンプルの定性 (step 300 時点)**: 三四郎・与次郎・美禰子 (= 「三四郎」 の人物) に偏った生成。
+   作品判別 (こころ / 三四郎 / 吾輩は猫である の使い分け) はまだ未獲得。 step 600+ のサンプルで再評価予定
+
+### 想定される最終結末 (step 800-1000 推測)
+
+| シナリオ | val_ppl の動き | 解釈 |
+|---|---|---|
+| **A. floor 更新** | 18.5 帯まで下がる | RoPE 単独で SwiGLU best を超える |
+| **B. SwiGLU と同等** | 18.7-18.9 で停滞・peak | 「収束加速のみ」 タイプ (論文どおり) |
+| **C. 早期 overfit** | step 700 から急上昇 | 表現力過多で正則化が追いつかず |
+
+現状の進行から **B (収束加速主体)** が最有力。 ただし RoPE は 200 step ごとの揺らぎがあるので断定は早い。
 
 ---
 
-## 統合実験 (RMSNorm + SwiGLU + RoPE)
+## 統合実験 (RMSNorm + SwiGLU + RoPE) — 累積効果
 
-D-1〜D-3 が個別に動いたら、 全部入りの **モダン構成** で漱石 7 作品を再学習し、
-LayerNorm + GELU + sinusoidal PE の baseline (Phase 4b: val_ppl 18.98) からの累積改善幅を測定する予定。
+D-1〜D-2 までの累積改善 (RoPE は step 600 時点での暫定値):
+
+| 構成 | best val_ppl | LN baseline 比 | best 到達時間 | LN baseline 比 |
+|------|-------------|---------------|-------------|---------------|
+| LN + GELU (baseline) | 18.98 | — | 7440s | — |
+| RMS + GELU (D-1) | 18.77 | -1.1% | 8540s | +14.8% |
+| RMS + SwiGLU (D-3) | **18.70** | **-1.5%** | **4370s** | **-41.3%** |
+| RMS + SwiGLU + RoPE (D-2) ※暫定 | 18.84 | -0.7% | **4350s** | **-41.5%** |
+
+**観察**:
+- **best 到達時間はほぼ同じ** (4370 vs 4350s) だが、 RoPE は step 100-400 の **early step で品質が圧倒的に良い**
+- 「同じ品質を半分の step で得る」 のではなく 「早期で既に十分な品質、 floor は同じ」 タイプの改善
+- 実用面では **学習を早期に切り上げ可能** という意味で有用 (step 400 で既に val_ppl 19.05、 step 600 SwiGLU と同等水準)
+
+step 700-1000 の結果が出た時点でこの表を最終化する予定。 また長文 (max_len 拡張) での汎化検証は今後の検討項目。

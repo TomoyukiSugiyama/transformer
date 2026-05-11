@@ -9,8 +9,8 @@
 | 項目 | 効果 | 影響範囲 | 状態 |
 |------|------|---------|------|
 | **RMSNorm** | val_ppl -1.1% (18.98 → 18.77) / 過学習開始を 100 step 後ろ倒し / 速度差は出ず | `layer_normalization` を差し替え | ✅ 完了 ([Phase D-1](phase_d.md#phase-d-1-rmsnorm-vs-layernorm)) |
-| **SwiGLU FFN** | 同 params で val_ppl 0.5〜2% 改善が期待 | `feed_forward_network` を差し替え | ✅ 実装完了 / 学習評価予定 ([Phase D-3](phase_d.md#phase-d-3-swiglu-ffn)) |
-| **RoPE** | 位置情報を相対化、 max_len 拡張時の汎化が向上 | `sinusoidal_pe` を撤去、 MHA 内に組込 | 未着手 |
+| **SwiGLU FFN** | val_ppl -0.4% (18.77 → 18.70) + ms/step **-35%** + best 到達 200 step 早期化 | `feed_forward_network` を差し替え | ✅ 完了 ([Phase D-3](phase_d.md#phase-d-3-swiglu-ffn)) |
+| **RoPE** | early step で val_ppl **-10〜22%** (収束加速)、 ms/step **+4%** (overhead は小) | `MultiHeadAttention` 内に組込、 `pe` を Option 化 | 🚧 学習中 ([Phase D-2](phase_d.md#phase-d-2-rope-学習中)) |
 | **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | 未着手 |
 
 RMSNorm / SwiGLU は他レイヤーへの影響が小さく独立に検証できる。 RoPE は positional encoding を

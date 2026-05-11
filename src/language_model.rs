@@ -9,6 +9,7 @@ use crate::{
     multi_head_attention::causal_mask,
     normalization::NormalizationKind,
     output_head::OutputHead,
+    positional_encoding::PositionalEncodingKind,
     sinusoidal_pe::SinusoidalPE,
     tokenizer::{Tokenizer, TokenizerKind, load_tokenizer, train_tokenizer},
     transformer::Transformer,
@@ -17,7 +18,8 @@ use crate::{
 pub struct LanguageModel {
     tokenizer: Box<dyn Tokenizer>,
     embedding: Embedding,
-    pe: SinusoidalPE,
+    /// Sinusoidal の場合のみ Some。 RoPE では位置情報は MHA 内で扱うため None。
+    pe: Option<SinusoidalPE>,
     transformer: Transformer,
     output_head: OutputHead,
     // ハイパーパラメータ
@@ -29,6 +31,7 @@ pub struct LanguageModel {
     dropout_p: f32,
     normalization_kind: NormalizationKind,
     feed_forward_kind: FeedForwardKind,
+    positional_encoding_kind: PositionalEncodingKind,
 }
 
 impl LanguageModel {
@@ -37,6 +40,7 @@ impl LanguageModel {
         tokenizer_kind: TokenizerKind,
         normalization_kind: NormalizationKind,
         feed_forward_kind: FeedForwardKind,
+        positional_encoding_kind: PositionalEncodingKind,
         vocab_size: usize,
         d_model: usize,
         n_heads: usize,
@@ -48,18 +52,24 @@ impl LanguageModel {
         let tokenizer = train_tokenizer(tokenizer_kind, corpus_text, vocab_size);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
+        let pe = match positional_encoding_kind {
+            PositionalEncodingKind::Sinusoidal => Some(SinusoidalPE::new(max_len, d_model)),
+            PositionalEncodingKind::Rope => None,
+        };
         Self {
             tokenizer,
             embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
-            pe: SinusoidalPE::new(max_len, d_model),
+            pe,
             transformer: Transformer::new(
                 n_layers,
                 d_model,
                 n_heads,
                 d_ff,
+                max_len,
                 dropout_p,
                 normalization_kind,
                 feed_forward_kind,
+                positional_encoding_kind,
             ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
@@ -70,6 +80,7 @@ impl LanguageModel {
             dropout_p,
             normalization_kind,
             feed_forward_kind,
+            positional_encoding_kind,
         }
     }
 
@@ -109,12 +120,21 @@ impl LanguageModel {
         }
     }
 
+    /// Sinusoidal の場合は位置エンコーディングを加算、 RoPE の場合は埋め込みを素通し。
+    /// (RoPE は MHA 内で Q, K に直接回転を掛けるためここで加算しない)
+    fn apply_positional_encoding(&self, emb: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+        match &self.pe {
+            Some(pe) => pe.forward(&emb),
+            None => emb,
+        }
+    }
+
     #[allow(dead_code)]
     fn forward_ids(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
         let emb = self.embedding.forward(token_ids);
-        let x = self.pe.forward(&emb);
+        let x = self.apply_positional_encoding(emb);
         let h = self.transformer.forward(&x, Some(&mask));
         self.output_head.forward(&h)
     }
@@ -125,7 +145,7 @@ impl LanguageModel {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
         let emb = self.embedding.forward(token_ids);
-        let x = self.pe.forward(&emb);
+        let x = self.apply_positional_encoding(emb);
         let h = self.transformer.forward(&x, Some(&mask));
         self.output_head.logits_last(&h[seq - 1])
     }
@@ -143,7 +163,7 @@ impl LanguageModel {
         self.set_training(false);
         let mask = causal_mask(seq);
         let emb = self.embedding.forward(token_ids);
-        let x = self.pe.forward(&emb);
+        let x = self.apply_positional_encoding(emb);
         let h = self.transformer.forward(&x, Some(&mask));
 
         let h_shifted = &h[..seq - 1];
@@ -166,7 +186,7 @@ impl LanguageModel {
         let mask = causal_mask(seq);
 
         let emb = self.embedding.forward(token_ids);
-        let x = self.pe.forward(&emb);
+        let x = self.apply_positional_encoding(emb);
         let h = self.transformer.forward(&x, Some(&mask));
 
         let h_shifted = &h[..seq - 1];
@@ -268,6 +288,10 @@ impl LanguageModel {
         map.insert_scalar("meta.dropout_p", self.dropout_p.to_bits() as u64);
         map.insert_scalar("meta.normalization_kind", self.normalization_kind.as_u64());
         map.insert_scalar("meta.feed_forward_kind", self.feed_forward_kind.as_u64());
+        map.insert_scalar(
+            "meta.positional_encoding_kind",
+            self.positional_encoding_kind.as_u64(),
+        );
         map.merge("tokenizer", self.tokenizer.to_weight_map());
         map.merge("embedding", self.embedding.to_weight_map());
         map.merge("transformer", self.transformer.to_weight_map());
@@ -306,21 +330,32 @@ impl LanguageModel {
             .get_scalar("meta.feed_forward_kind")
             .and_then(FeedForwardKind::from_u64)
             .unwrap_or(FeedForwardKind::Gelu);
+        // 旧 checkpoint には存在しないので Sinusoidal にフォールバック
+        let positional_encoding_kind = map
+            .get_scalar("meta.positional_encoding_kind")
+            .and_then(PositionalEncodingKind::from_u64)
+            .unwrap_or(PositionalEncodingKind::Sinusoidal);
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
 
+        let pe = match positional_encoding_kind {
+            PositionalEncodingKind::Sinusoidal => Some(SinusoidalPE::new(max_len, d_model)),
+            PositionalEncodingKind::Rope => None,
+        };
         let mut model = Self {
             tokenizer,
             embedding: Embedding::new(vocab_size, d_model, Some(pad_id)),
-            pe: SinusoidalPE::new(max_len, d_model),
+            pe,
             transformer: Transformer::new(
                 n_layers,
                 d_model,
                 n_heads,
                 d_ff,
+                max_len,
                 dropout_p,
                 normalization_kind,
                 feed_forward_kind,
+                positional_encoding_kind,
             ),
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
@@ -331,6 +366,7 @@ impl LanguageModel {
             dropout_p,
             normalization_kind,
             feed_forward_kind,
+            positional_encoding_kind,
         };
 
         model.embedding.from_weight_map(&map.scoped("embedding"))?;

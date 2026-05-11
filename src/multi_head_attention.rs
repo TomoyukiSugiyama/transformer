@@ -9,6 +9,7 @@ use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
 use crate::matrix::Matrix;
+use crate::rope::Rope;
 
 pub struct MultiHeadAttention {
     w_q: Matrix, // (d_model, d_model)
@@ -22,8 +23,8 @@ pub struct MultiHeadAttention {
     grad_w_o: Matrix,
 
     cache_x: Matrix,           // (seq, d_model)
-    cache_q: Matrix,           // (seq, d_model)
-    cache_k: Matrix,           // (seq, d_model)
+    cache_q: Matrix,           // (seq, d_model) ※未回転
+    cache_k: Matrix,           // (seq, d_model) ※未回転
     cache_v: Matrix,           // (seq, d_model)
     cache_concat: Matrix,      // (seq, d_model)
     cache_att_w: Vec<Matrix>,  // n_heads × (seq, seq)
@@ -32,15 +33,28 @@ pub struct MultiHeadAttention {
     n_heads: usize,
     d_model: usize,
     d_head: usize,
+
+    /// Some の場合は Q, K に回転位置エンコーディングを適用する。
+    /// V には掛けない (RoPE の規約)。
+    rope: Option<Rope>,
 }
 
 impl MultiHeadAttention {
-    pub fn new(d_model: usize, n_heads: usize) -> Self {
+    pub fn new(d_model: usize, n_heads: usize, rope: Option<Rope>) -> Self {
         assert!(
             d_model % n_heads == 0,
             "d_model must to dibisible by n_heads"
         );
         let d_head = d_model / n_heads;
+        if let Some(r) = &rope {
+            assert_eq!(
+                r.d_head(),
+                d_head,
+                "Rope d_head ({}) must match MHA d_head ({})",
+                r.d_head(),
+                d_head
+            );
+        }
         let mut rng = rng();
         let scale = (1.0 / d_model as f32).sqrt();
         let mut rand_matrix = |rows: usize, cols: usize| -> Matrix {
@@ -70,6 +84,7 @@ impl MultiHeadAttention {
             n_heads,
             d_model,
             d_head,
+            rope,
         }
     }
 
@@ -85,9 +100,18 @@ impl MultiHeadAttention {
         let k = x_m.matmul(&self.w_k);
         let v = x_m.matmul(&self.w_v);
 
-        let q_heads = q.split_columns(self.n_heads);
-        let k_heads = k.split_columns(self.n_heads);
+        let mut q_heads = q.split_columns(self.n_heads);
+        let mut k_heads = k.split_columns(self.n_heads);
         let v_heads = v.split_columns(self.n_heads);
+
+        // RoPE: Q と K のみに位置回転を適用 (V には適用しない)。
+        // backward でも同じ回転が必要なので、 ここでの結果は捨てて backward で再計算する。
+        if let Some(rope) = &self.rope {
+            for h in 0..self.n_heads {
+                rope.apply_in_place(&mut q_heads[h]);
+                rope.apply_in_place(&mut k_heads[h]);
+            }
+        }
 
         let mut all_weights = Vec::with_capacity(self.n_heads);
         let mut head_outputs = Vec::with_capacity(self.n_heads);
@@ -127,8 +151,16 @@ impl MultiHeadAttention {
         let dl_dhead_outs = dl_dconcat.split_columns(self.n_heads);
 
         // scaled_dot_product_attention backward（head ごと）
-        let q_heads = self.cache_q.split_columns(self.n_heads);
-        let k_heads = self.cache_k.split_columns(self.n_heads);
+        // RoPE 使用時、 attention は **回転後** の Q', K' に対して計算されたので、
+        // backward の入力にも回転後の値が必要。 cache は未回転なので再回転する。
+        let mut q_heads = self.cache_q.split_columns(self.n_heads);
+        let mut k_heads = self.cache_k.split_columns(self.n_heads);
+        if let Some(rope) = &self.rope {
+            for h in 0..self.n_heads {
+                rope.apply_in_place(&mut q_heads[h]);
+                rope.apply_in_place(&mut k_heads[h]);
+            }
+        }
 
         let mut dl_dq_heads = Vec::with_capacity(self.n_heads);
         let mut dl_dk_heads = Vec::with_capacity(self.n_heads);
@@ -144,6 +176,14 @@ impl MultiHeadAttention {
             dl_dq_heads.push(dq);
             dl_dk_heads.push(dk);
             dl_dv_heads.push(dv);
+        }
+
+        // RoPE backward: dL/dQ' から dL/dQ へ (= 逆回転)。 V は未回転なので不要。
+        if let Some(rope) = &self.rope {
+            for h in 0..self.n_heads {
+                rope.apply_backward_in_place(&mut dl_dq_heads[h]);
+                rope.apply_backward_in_place(&mut dl_dk_heads[h]);
+            }
         }
 
         // split_heads backward → head の勾配を結合して [seq, d_model] に戻す

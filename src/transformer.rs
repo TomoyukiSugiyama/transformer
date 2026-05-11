@@ -6,6 +6,8 @@ use crate::feed_forward::FeedForwardKind;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
+use crate::positional_encoding::PositionalEncodingKind;
+use crate::rope::Rope;
 use crate::{
     adam_w::AdamW,
     checkpoint::{Checkpointable, WeightMap},
@@ -23,10 +25,20 @@ impl Transformer {
         d_model: usize,
         n_heads: usize,
         d_ff: usize,
+        max_len: usize,
         dropout_p: f32,
         normalization_kind: NormalizationKind,
         feed_forward_kind: FeedForwardKind,
+        positional_encoding_kind: PositionalEncodingKind,
     ) -> Self {
+        // RoPE 使用時は head ごとに同じ cos/sin テーブルを共有する。
+        // 各 block / head に複製されるが、 サイズは max_len * d_head/2 * 2 で
+        // d_head=64, max_len=256 の場合 64KB/layer 程度なので無視できる。
+        let d_head = d_model / n_heads;
+        let rope_template = match positional_encoding_kind {
+            PositionalEncodingKind::Rope => Some(Rope::new(max_len, d_head, 10000.0)),
+            PositionalEncodingKind::Sinusoidal => None,
+        };
         Self {
             blocks: (0..n_layers)
                 .map(|_| {
@@ -37,6 +49,7 @@ impl Transformer {
                         dropout_p,
                         normalization_kind,
                         feed_forward_kind,
+                        rope_template.clone(),
                     )
                 })
                 .collect(),
