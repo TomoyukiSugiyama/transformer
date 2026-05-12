@@ -46,6 +46,36 @@ macOS の Accelerate と同じ構造 (`#[cfg(target_os = ...)]` 分岐) で `ope
 `d_model=512〜768` に拡大すると matmul の比率も問題サイズも大きくなり、
 Accelerate 単独効果が `1.7×` から **`2〜3×`** に伸びる見込み。
 
+## 学習時間の高速化 (Phase 6 候補)
+
+Phase 5-4a (d=512, n_layers=6, batch=32) の現状: per-step ~9.4s、 実効 150 GFLOPS
+(M1 Max AMX 理論ピーク 700 GFLOPS の **21%**)。 改善余地あり。
+
+### Tier 1 (大改善, 5-15x): 大きな設計変更が必要
+- **Apple GPU (Metal/MPS) 移植** — Pure Rust の精神を壊す
+- **CUDA/ROCm 移植** — 巨大な追加コスト
+
+### Tier 2 (1.5-3x, 推奨): エンジニアリング改善
+
+| 案 | 効果 | 工数 | 説明 |
+|----|------|------|------|
+| **`Vec<Vec<f32>>` → `Matrix` 全面置換** | 1.3-1.7x | 中 (1 日) | KV cache で見えた alloc コストが学習にも効いている。 norm/ffn/dropout/embedding/loss を `Matrix` に統一 |
+| **batch_size 拡大 (32→64)** + LR 比例 | 1.2-1.5x | 小 | AMX タイル利用効率向上 |
+| **WSD (Warmup-Stable-Decay) スケジューラ** | 同 val_ppl を 15-30% 早く到達 | 小 | MiniCPM/DeepSeek 慣例 |
+| **Flash Attention 風融合 (softmax + matmul)** | 1.3-2x (attn 部分のみ) | 中-大 | CPU でも IO 削減で効く |
+| **Grad accumulation (effective batch 256-512)** | 収束 step 削減の可能性 | 小 | LLaMA / GPT-3 慣例 |
+
+### Tier 3 (1.8-2.5x): mixed precision
+- **bf16 / f16** (Apple BNNS 経由) — Matrix の dtype 抽象化が必要、 数値安定性試験要
+
+### Tier 4: 「収束 step 数を減らす」 アプローチ
+- BPE トークナイザに切替 (vocab 8K-16K で token 数 1/2-1/3) — step 数比例で削減
+- z-loss / aux loss、 カリキュラム学習、 SP/μP init
+
+### 着手判断
+- 現在の Phase 5-4a 完了 (~3.7h) を **見守る** 方針 (実行中の変更はリスクが高い)
+- Phase 5-4b/c で **per-step が 1.5-2 倍** になり、 トータル学習時間が 13-21h になるのが現実化したら、 その時点で Tier 2 (Matrix 統一 + batch 拡大) を検討
+
 ## 推論時のキャッシュ機構 (KV cache) ✅ 完了 (4.71x speedup @ d=512)
 
 各 layer の `K` (RoPE 適用済) と `V` (未回転) を `KvCache` に保持し、
