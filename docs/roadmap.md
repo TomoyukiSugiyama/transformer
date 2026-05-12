@@ -28,22 +28,32 @@
 | 5-1 | top-p (nucleus) sampling | 18.84 (変わらず、 体感品質は限定的) | ✅ 完了 |
 | 5-2 | max_len 256 → 512 | **17.76 (実測, vs 4b -5.0%)** | ✅ 完了 |
 | 5-3 | コーパス拡大 1M → 8.3M char (5 作家追加) | **18.71 (実測, 想定外悪化)** — モデル容量律速の反証 | ✅ 完了 |
-| 5-4a | モデル拡大 d_model 384 → **512** (~20M params) | **18.16 (実測, 5-3 比 -2.9%, BPC 8.17 全 phase 最高)** | ✅ 完了 |
-| 5-4b/c | モデル拡大 d=512+L8 / d=768 | 13〜17 | 📋 判断保留 |
+| 5-4a | モデル拡大 d_model 384 → **512** (~20M params) | **18.16 (実測, 5-3 比 -2.9%, BPC 4.18, char tokenizer 系で最高)** | ✅ 完了 |
+| 5-4b/c | モデル拡大 d=512+L8 / d=768 | 13〜17 | 📋 判断保留 (Phase 6 完了後に再検討) |
+
+> 注: Phase 6-a (CharBPE 8K) で **BPC 3.76 (Phase 5-4a 比 -10.0%)** に更新され、 全 phase 通算で最高。 Phase 5-4a は 1 token=1 char のため当時の絶対 val_ppl 比較では最高だった。
 
 詳細は [docs/phase5.md](phase5.md) を参照。
 
-## トークナイザ刷新 (Phase 6) — 着手中
+## トークナイザ刷新 (Phase 6) — 6-a 完了
 
 Phase 5-4a 完了後、 質的課題 (bigram 切り誤り、 短コンテキスト、 文体一貫性) を **トークナイザ側** で改善するアプローチ。
 
-| 段階 | 項目 | 期待 | 状態 |
+| 段階 | 項目 | 期待 / 実測 | 状態 |
 |------|------|------|------|
-| 6-a | Unicode char-level BPE (vocab 8K) | 1 token ~1.8 char, 実質 context ~922 char, BPC < 4.18 | 🚧 実装完了、 学習未実施 |
-| 6-b | Unicode char-level BPE (vocab 16K) | 1 token ~2.5 char, 実質 context ~1,280 char | 📋 計画 |
+| 6-a | Unicode char-level BPE (vocab 8K) | **実測 BPC 3.76 (Phase 5-4a 比 -10.0%)、 1 token=1.64 char、 実効 context ~840 char** | ✅ 完了 |
+| 6-b | Unicode char-level BPE (vocab 16K) | 1 token ~2.5 char, 実質 context ~1,280 char, BPC 3.65-3.72 期待 | 📋 計画 |
 
-実装: `src/char_bpe_tokenizer.rs` (新規、 byte-level の既存 BPE は英語用に保持)。
-詳細は [docs/phase6.md](phase6.md) を参照。
+実装: `src/char_bpe_tokenizer.rs` (新規、 byte-level の既存 BPE は英語用に保持)。 詳細・最終結果は [docs/phase6.md](phase6.md#phase-6-a-結果--完了) を参照。
+
+### Phase 6-a 達成サマリ
+
+- ✅ **BPC 4.18 → 3.76 (-10.0%)** で全 phase 中ベスト
+- ✅ best 到達 step: 2800 → **2400 (-400 step)** で早期収束
+- ✅ 実効コンテキスト 512 char → **840 char (+64%)** で同 max_len/batch のまま
+- ✅ 質的にも **「津田 + お延」(『明暗』)、 「高柳君」(『野分』)、 「カムパネルラ + 苹果」(『銀河鉄道』)** などの作品横断キャラクタ関係を正確再現
+- ⚠️ step 2400 以降 train-val gap 拡大 (軽度オーバーフィット)
+- ⚠️ 戯曲記号・作家ヘッダ・作家ミックスは未解消 (Phase 7 候補)
 
 ## 過学習の更なる抑制
 - **attention dropout の追加** ([Phase 3](phase3.md) で導入したのは residual 直前の 2 箇所のみ)。
