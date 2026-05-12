@@ -33,7 +33,7 @@
 | **Attention 計算** | 標準 Scaled Dot-Product (O(n²) memory) | [`multi_head_attention.rs`](../src/multi_head_attention.rs) | **FlashAttention 2/3** (IO-aware, O(n) memory, GPU 専用) | FlashAttention 未実装 (CPU では効果も限定的だが、 長 seq でメモリ逼迫) |
 | **モデル規模** | 最大 ~50M params (d_model=768, n_layers=8) | [`main.rs`](../src/main.rs) `Config::aozora_meiji_taisho_d768_max512` | LLaMA 3: 8B-405B, Claude / Gemini: 数百 B-1 T | **桁違いのスケール差** (~3 桁) — 学習目的としては適切 |
 | **Dropout** | Inverted dropout (train/eval 切替) | [`dropout.rs`](../src/dropout.rs) | LLaMA / Mistral 系では `dropout=0` (データ量で代替) | nanoGPT 準拠で適切 (小規模コーパスでは必要)。 Attention 内 dropout は未実装 |
-| **KV Cache** | **未実装** (毎 token で全 context を再計算) | [`roadmap.md`](roadmap.md) | フロンティアモデル全てで必須 | 生成速度が O(n²)。 `max_len=512` 以上で顕著。 [Phase 6 候補](roadmap.md) |
+| **KV Cache** | ✅ **実装済** (RoPE 適用後 K + 未回転 V を per-layer で保持) | [`kv_cache.rs`](../src/kv_cache.rs), [`docs/kv_cache.md`](kv_cache.md) | フロンティアモデル全てで必須 | ✅ **同等**。 per-token 計算量が `O(n²·d) → O(n·d)`。 残: KV truncation (sliding window) は未対応 |
 | **MoE (Mixture of Experts)** | 未実装 | — | Mixtral, DeepSeek-V3, Gemini 2.5 (sparse MoE 8 of 64 等) | アーキ的に大きなギャップだが、 50M params 規模では本質的に不要 |
 | **チェックポイント** | カスタムバイナリ (`best.bin` / `latest.bin` / `inference.bin`) | [`checkpoint.rs`](../src/checkpoint.rs) | **SafeTensors** (HF 標準), GGUF (llama.cpp 系) | HuggingFace エコシステム非対応。 互換 loader は今後の検討 |
 | **並列化** | rayon (CPU 並列) + Apple Accelerate / matrixmultiply | [`docs/performance.md`](performance.md) | FSDP, Tensor Parallel, Pipeline Parallel (GPU 分散) | GPU 非対応、 シングルノード CPU のみ |
@@ -45,12 +45,13 @@
 
 [`roadmap.md`](roadmap.md) と整合的に並べた優先度:
 
-1. **KV cache** — 推論速度ボトルネック解消。 これがないと max_len 拡張のメリットが推論時に出ない
+1. ~~**KV cache**~~ ✅ 実装済 → [`kv_cache.md`](kv_cache.md)
 2. **FlashAttention (Rust + Accelerate 流)** — 長 seq 対応のためのメモリ最適化。 IO-aware なら CPU でも効果あり
-3. **GQA / MQA** — KV cache と組合せて推論時メモリ削減
-4. **YaRN / ABF (RoPE 拡張)** — 学習時 `max_len=512` を超える長さへの外挿能力
-5. **SafeTensors 互換 (read-only)** — HuggingFace モデルを読み込めるようにし、 検証ベンチマーク (HellaSwag / ARC 等) を実装に流せるようにする
-6. **bf16 サポート** — M1 系の bf16 AMX を使った matmul 高速化
+3. **GQA / MQA** — KV cache と組合せて KV メモリを `1/n_heads` に削減
+4. **KV cache truncation (sliding window)** — `max_len` 超過時の継続生成
+5. **YaRN / ABF (RoPE 拡張)** — 学習時 `max_len=512` を超える長さへの外挿能力
+6. **SafeTensors 互換 (read-only)** — HuggingFace モデルを読み込めるようにし、 検証ベンチマーク (HellaSwag / ARC 等) を実装に流せるようにする
+7. **bf16 サポート** — M1 系の bf16 AMX を使った matmul 高速化
 
 **意図的に優先度を下げているもの**:
 - **MoE**: 50M 規模では理論的にも実用的にも効果薄い
@@ -63,7 +64,7 @@
 |---------|------|
 | **モダン LLM の中核要素 (Norm / FFN / RoPE / Pre-Norm)** | ✅ SoTA と整合的に実装済 |
 | **学習の安定化 (AdamW + Gradient Clip + Cosine LR)** | ✅ 標準的な手法は揃っている |
-| **推論最適化 (KV cache / FlashAttention / 量子化)** | ❌ 大きく不足 — future work |
+| **推論最適化 (KV cache / FlashAttention / 量子化)** | 🟡 KV cache 実装済、 FlashAttention・量子化は future work |
 | **スケール (params / data / compute)** | ❌ 3 桁の差 — 学習用 OSS としては適切 |
 | **エコシステム (SafeTensors / HF)** | ❌ 未対応 — 簡易 loader を今後検討 |
 | **教育的価値 (Pure Rust / 1 ファイル単位の追跡性)** | ⭐⭐⭐ **本実装の差別化価値** |

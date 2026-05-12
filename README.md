@@ -75,7 +75,8 @@ LR スケジューラと AdamW の数式・実装値は [`docs/tuning.md`](docs/
 | [docs/phase_d.md](docs/phase_d.md) | Phase D: モダンアーキテクチャ導入 (RMSNorm + SwiGLU + RoPE、 累積で val_ppl -1.5% / 学習時間 -41%) |
 | [docs/phase5.md](docs/phase5.md) | Phase 5: 生成品質向上計画 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大) |
 | [docs/sota_comparison.md](docs/sota_comparison.md) | SoTA LLM (LLaMA 3 / Claude / Gemini / DeepSeek) との要素別比較・本実装の立ち位置 |
-| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase 5 進捗 / KV cache / OpenBLAS 等) |
+| [docs/kv_cache.md](docs/kv_cache.md) | KV cache の実装解説 (per-token 計算量を `O(n²·d) → O(n·d)` に削減) |
+| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase 5 進捗 / FlashAttention / OpenBLAS 等) |
 
 ## 依存
 

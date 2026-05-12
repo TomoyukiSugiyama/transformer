@@ -59,6 +59,13 @@ impl Embedding {
             .collect()
     }
 
+    /// 推論専用: 単一 token id を 1 ベクトルに埋め込む (内部 cache は触らない)。
+    /// KV cache 利用時の 1 token 前進で使用。
+    pub fn forward_one(&self, token_id: usize) -> Vec<f32> {
+        let scale = (self.d_model as f32).sqrt();
+        self.lookup(token_id).iter().map(|&v| v * scale).collect()
+    }
+
     pub fn backward(&mut self, dl_dx: &[Vec<f32>]) {
         let scale = (self.d_model as f32).sqrt();
 

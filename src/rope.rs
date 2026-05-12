@@ -74,6 +74,31 @@ impl Rope {
         }
     }
 
+    /// 単一行 (1 token 分の head ベクトル) を **指定位置の角度** で in-place 回転する。
+    /// KV cache を使った逐次推論で、 新規 token 1 つだけを 「位置 `pos` に置いた」 として
+    /// 回転するために使う。 通常の `apply_in_place` は行 index = 位置と仮定するので、
+    /// 過去 cache (位置 0..cur_len) と並べた瞬間の新規 token (位置 cur_len) には使えない。
+    pub fn apply_at_position(&self, row: &mut [f32], pos: usize) {
+        assert_eq!(row.len(), self.d_head, "RoPE: row.len mismatch");
+        assert!(
+            pos < self.max_len,
+            "RoPE: pos {} exceeds max_len {}",
+            pos,
+            self.max_len
+        );
+        let half = self.d_head / 2;
+        let cos_row = &self.cos_table[pos];
+        let sin_row = &self.sin_table[pos];
+        for i in 0..half {
+            let x0 = row[2 * i];
+            let x1 = row[2 * i + 1];
+            let c = cos_row[i];
+            let s = sin_row[i];
+            row[2 * i] = c * x0 - s * x1;
+            row[2 * i + 1] = s * x0 + c * x1;
+        }
+    }
+
     /// 逆方向の回転を in-place で適用する (backward, R(-θ))。
     /// 順回転に対する勾配の伝播に用いる: dL/dx = R(-θ) · dL/dy。
     pub fn apply_backward_in_place(&self, x: &mut Matrix) {
@@ -252,6 +277,39 @@ mod tests {
                     "sin mismatch at pos={pos}, i={i}: got {}, expected {}",
                     rope.sin_table[pos][i],
                     expected_sin
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_at_position_matches_full_sequence_rotation() {
+        // apply_at_position(row, pos) と apply_in_place で pos 行目に置いたときの
+        // 結果が一致する (= 単一行のショートカットが正しい) ことを確認。
+        let d_head = 8;
+        let rope = Rope::new(20, d_head, 10000.0);
+        let mut rng = SmallRng::seed_from_u64(99);
+        let single: Vec<f32> = (0..d_head).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+        for pos in [0usize, 1, 5, 19] {
+            // (pos+1, d_head) の行列を作って pos 行目だけに値を入れて全体回転
+            let mut full = Matrix::zeros(pos + 1, d_head);
+            for j in 0..d_head {
+                full.row_mut(pos)[j] = single[j];
+            }
+            rope.apply_in_place(&mut full);
+            let expected = full.row(pos).to_vec();
+
+            // 単一行を apply_at_position で回転
+            let mut single_copy = single.clone();
+            rope.apply_at_position(&mut single_copy, pos);
+
+            for j in 0..d_head {
+                assert!(
+                    (single_copy[j] - expected[j]).abs() < 1e-6,
+                    "mismatch at pos={pos}, j={j}: single={}, full={}",
+                    single_copy[j],
+                    expected[j]
                 );
             }
         }

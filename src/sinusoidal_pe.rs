@@ -19,6 +19,17 @@ impl SinusoidalPE {
         Self { table }
     }
 
+    /// 推論専用: 単一 token に対して指定位置の位置エンコーディングを加算する。
+    /// KV cache を使った逐次デコードで使用。
+    pub fn add_at(&self, embedding: &[f32], pos: usize) -> Vec<f32> {
+        assert!(pos < self.table.len(), "pos {} exceeds max_len", pos);
+        embedding
+            .iter()
+            .zip(self.table[pos].iter())
+            .map(|(e, pe)| e + pe)
+            .collect()
+    }
+
     pub fn forward(&self, token_enb: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let seq_len = token_enb.len();
         assert!(seq_len <= self.table.len(), "seq_len exceeded max_len");

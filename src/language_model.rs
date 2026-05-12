@@ -6,6 +6,7 @@ use crate::{
     cross_entropy_loss::CrossEntropyLoss,
     embedding::Embedding,
     feed_forward::FeedForwardKind,
+    kv_cache::KvCache,
     multi_head_attention::causal_mask,
     normalization::NormalizationKind,
     output_head::OutputHead,
@@ -246,6 +247,7 @@ impl LanguageModel {
         out
     }
 
+    #[allow(dead_code)]
     pub fn generate_top_k(
         &mut self,
         prompt_text: &str,
@@ -272,6 +274,7 @@ impl LanguageModel {
         out
     }
 
+    #[allow(dead_code)]
     pub fn generate_top_p(
         &mut self,
         prompt_text: &str,
@@ -292,6 +295,143 @@ impl LanguageModel {
                 break;
             }
             ids.push(next_id);
+        }
+        let out = self.detokenize(&ids);
+        self.set_training(true);
+        out
+    }
+
+    /// 推論専用: 1 token を全モデル通して前進し、 その位置の logits を返す。
+    /// 内部で Embedding → PE (Sinusoidal の場合のみ) → Transformer.forward_step
+    /// → output_head.logits_last を呼び出す。
+    /// `caches[0].cur_len()` が **これから推論する位置** に一致する前提
+    /// (= cache が pos 個 token 分のデータを持っているとき、 pos 番目を計算する)。
+    fn forward_step_last(&mut self, token_id: usize, caches: &mut [KvCache]) -> Vec<f32> {
+        let pos = caches[0].cur_len();
+        let emb = self.embedding.forward_one(token_id);
+        let x = match &self.pe {
+            Some(pe) => pe.add_at(&emb, pos),
+            None => emb,
+        };
+        let h = self.transformer.forward_step(&x, caches);
+        self.output_head.logits_last(&h)
+    }
+
+    /// `generate_top_k` と同じだが KV cache を使って高速化したバージョン。
+    /// no-cache 版と **同じ乱数経路と repetition penalty** を踏むので、
+    /// 同一サンプリング結果を期待できる (RNG seed が固定なら完全一致)。
+    pub fn generate_top_k_with_cache(
+        &mut self,
+        prompt_text: &str,
+        max_new_token: usize,
+        k: usize,
+        temperature: f32,
+        repetition_penalty: f32,
+    ) -> String {
+        self.set_training(false);
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
+        // 起点となる context (max_len を超えていたら末尾を切る)。
+        let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
+
+        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+
+        // Prefill: 最後の token 以外を順に流して cache を埋める (logits は捨てる)。
+        // 最後の token は logits を取って sampling に回すため、 別扱い。
+        for &tid in &prompt_ctx[..prompt_ctx.len() - 1] {
+            let _ = self.forward_step_last(tid, &mut caches);
+        }
+        let mut next_input = *prompt_ctx.last().unwrap();
+
+        for _ in 0..max_new_token {
+            // 容量超過のリスクチェック: cache.cur_len() == max_len なら sliding-window
+            // 退避が必要だが、 ここでは単純に early-stop (将来 KV truncation を実装予定)。
+            if caches[0].cur_len() >= self.max_len {
+                break;
+            }
+            let mut logits = self.forward_step_last(next_input, &mut caches);
+            apply_repetition_penalty(&mut logits, &ids, repetition_penalty);
+            let next_id = OutputHead::top_k_sample(&logits, k, temperature);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
+            next_input = next_id;
+        }
+        let out = self.detokenize(&ids);
+        self.set_training(true);
+        out
+    }
+
+    /// `generate_top_p` の KV cache 版。
+    pub fn generate_top_p_with_cache(
+        &mut self,
+        prompt_text: &str,
+        max_new_token: usize,
+        p: f32,
+        temperature: f32,
+        repetition_penalty: f32,
+    ) -> String {
+        self.set_training(false);
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
+        let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
+        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+
+        for &tid in &prompt_ctx[..prompt_ctx.len() - 1] {
+            let _ = self.forward_step_last(tid, &mut caches);
+        }
+        let mut next_input = *prompt_ctx.last().unwrap();
+
+        for _ in 0..max_new_token {
+            if caches[0].cur_len() >= self.max_len {
+                break;
+            }
+            let mut logits = self.forward_step_last(next_input, &mut caches);
+            apply_repetition_penalty(&mut logits, &ids, repetition_penalty);
+            let next_id = OutputHead::top_p_sample(&logits, p, temperature);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
+            next_input = next_id;
+        }
+        let out = self.detokenize(&ids);
+        self.set_training(true);
+        out
+    }
+
+    /// 検証用: greedy decoding を KV cache で行う。 同じ入力に対し
+    /// `forward_ids_last` を毎 step 回す方式と **完全一致** する logits 系列を出すことを
+    /// 単体テストで保証する。
+    #[allow(dead_code)]
+    pub fn generate_greedy_with_cache(
+        &mut self,
+        prompt_text: &str,
+        max_new_token: usize,
+    ) -> String {
+        self.set_training(false);
+        let mut ids = self.tokenizer.encode_prompt(prompt_text);
+        let eos_id = self.tokenizer.eos_id();
+        let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
+        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+
+        for &tid in &prompt_ctx[..prompt_ctx.len() - 1] {
+            let _ = self.forward_step_last(tid, &mut caches);
+        }
+        let mut next_input = *prompt_ctx.last().unwrap();
+
+        for _ in 0..max_new_token {
+            if caches[0].cur_len() >= self.max_len {
+                break;
+            }
+            let logits = self.forward_step_last(next_input, &mut caches);
+            let next_id = OutputHead::greedy(&logits);
+            if next_id == eos_id {
+                break;
+            }
+            ids.push(next_id);
+            next_input = next_id;
         }
         let out = self.detokenize(&ids);
         self.set_training(true);
@@ -459,4 +599,125 @@ fn clip_grad_norm(mut grads: Vec<Vec<f32>>, max_norm: f32) -> Vec<Vec<f32>> {
         grads.iter_mut().flatten().for_each(|v| *v *= scale);
     }
     grads
+}
+
+#[cfg(test)]
+mod kv_cache_tests {
+    use super::*;
+
+    fn small_corpus() -> &'static str {
+        "abcdefghijklmnopqrstuvwxyz0123456789 .,!?\n"
+    }
+
+    fn build_tiny_model(
+        norm: NormalizationKind,
+        ff: FeedForwardKind,
+        pe: PositionalEncodingKind,
+    ) -> LanguageModel {
+        // 小さいモデルを作って no-cache vs with-cache を比較する。
+        // 学習させていないランダム初期重みでも、 forward が決定的なら logits は一致するはず。
+        LanguageModel::new(
+            small_corpus(),
+            TokenizerKind::Char,
+            norm,
+            ff,
+            pe,
+            0,    // vocab_size = 0 → tokenizer から自動算出 (Char)
+            32,   // d_model
+            4,    // n_heads (d_head=8 は偶数なので RoPE OK)
+            64,   // d_ff
+            2,    // n_layers
+            32,   // max_len
+            0.0,  // dropout (eval モードなら効かないが念のため 0)
+        )
+    }
+
+    #[test]
+    fn greedy_with_cache_matches_no_cache_rope_rms_swiglu() {
+        let mut model = build_tiny_model(
+            NormalizationKind::Rms,
+            FeedForwardKind::SwiGlu,
+            PositionalEncodingKind::Rope,
+        );
+        let prompt = "abc";
+        let no_cache = model.generate(prompt, 8, 1.0);
+        let with_cache = model.generate_greedy_with_cache(prompt, 8);
+        assert_eq!(
+            no_cache, with_cache,
+            "RoPE+RMS+SwiGLU greedy 出力が一致しない\n  no_cache: {no_cache:?}\n  with_cache: {with_cache:?}",
+        );
+    }
+
+    #[test]
+    fn greedy_with_cache_matches_no_cache_sinusoidal_layernorm_gelu() {
+        let mut model = build_tiny_model(
+            NormalizationKind::Layer,
+            FeedForwardKind::Gelu,
+            PositionalEncodingKind::Sinusoidal,
+        );
+        let prompt = "xyz";
+        let no_cache = model.generate(prompt, 8, 1.0);
+        let with_cache = model.generate_greedy_with_cache(prompt, 8);
+        assert_eq!(
+            no_cache, with_cache,
+            "Sinusoidal+LayerNorm+GELU greedy 出力が一致しない\n  no_cache: {no_cache:?}\n  with_cache: {with_cache:?}",
+        );
+    }
+
+    #[test]
+    fn greedy_with_cache_matches_no_cache_rope_layernorm_gelu() {
+        // 組合せ違いも 1 つ確認 (RoPE × LN × GELU)
+        let mut model = build_tiny_model(
+            NormalizationKind::Layer,
+            FeedForwardKind::Gelu,
+            PositionalEncodingKind::Rope,
+        );
+        let prompt = "hello";
+        let no_cache = model.generate(prompt, 12, 1.0);
+        let with_cache = model.generate_greedy_with_cache(prompt, 12);
+        assert_eq!(no_cache, with_cache);
+    }
+
+    #[test]
+    fn forward_step_last_logits_match_forward_ids_last_per_position() {
+        // 最も厳密な検証: 各位置で 「これまでの prefix を毎回 forward_ids_last に流す」
+        // と 「逐次 forward_step_last」 の logits が (token-wise argmax で) 一致するか。
+        let mut model = build_tiny_model(
+            NormalizationKind::Rms,
+            FeedForwardKind::SwiGlu,
+            PositionalEncodingKind::Rope,
+        );
+        model.set_training(false);
+        let ids = model.tokenizer.encode_prompt("hello world");
+        let mut caches = model.transformer.init_kv_caches(model.max_len, model.d_model);
+
+        // ids の各 prefix の最終位置 logits を 2 通りで計算
+        for end in 1..=ids.len() {
+            let prefix = &ids[..end];
+
+            // no-cache: 毎回 prefix 全部を forward
+            let logits_no_cache = model.forward_ids_last(prefix);
+            let argmax_no_cache = OutputHead::greedy(&logits_no_cache);
+
+            // with-cache: 直前の token を 1 つだけ feed
+            let new_token = ids[end - 1];
+            let logits_with_cache = model.forward_step_last(new_token, &mut caches);
+            let argmax_with_cache = OutputHead::greedy(&logits_with_cache);
+
+            assert_eq!(
+                argmax_no_cache, argmax_with_cache,
+                "argmax mismatch at position {} (1-indexed): no_cache={}, with_cache={}",
+                end, argmax_no_cache, argmax_with_cache,
+            );
+            // 数値も近いことを確認 (FP 誤差の範囲)
+            for (i, (a, b)) in logits_no_cache.iter().zip(&logits_with_cache).enumerate() {
+                let diff = (a - b).abs();
+                assert!(
+                    diff < 1e-3,
+                    "logit mismatch at position {} vocab {}: no_cache={}, with_cache={}, diff={}",
+                    end, i, a, b, diff,
+                );
+            }
+        }
+    }
 }

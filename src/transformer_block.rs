@@ -6,6 +6,7 @@ use crate::dropout::Dropout;
 use crate::feed_forward::FeedForward;
 use crate::feed_forward::FeedForwardKind;
 use crate::feed_forward::load_feed_forward;
+use crate::kv_cache::KvCache;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -93,6 +94,35 @@ impl TransformerBlock {
         let dl_dx_from_mha = self.norm1.backward(&dl_dnorm1);
 
         residual_add(&dl_dx_from_res, &dl_dx_from_mha)
+    }
+
+    /// 推論専用 (KV cache あり) の 1 token 前進。
+    /// `x_new` は単一 token (`d_model` 長)、 戻り値も `d_model` 長。
+    /// dropout は **無効化済み** であることを呼び出し側で保証 (`set_training(false)`)。
+    pub fn forward_step(&mut self, x_new: &[f32], cache: &mut KvCache) -> Vec<f32> {
+        // norm/ffn は既存の `forward(&[Vec<f32>])` を 1-row Vec で呼び出して再利用。
+        // 内部の training cache は上書きされるが、 backward は呼ばれない前提なので無害。
+        let single = vec![x_new.to_vec()];
+
+        let norm1 = self.norm1.forward(&single);
+        let attn_out = self.mha.forward_step(&norm1[0], cache);
+        // dropout は eval モードなら identity (drop_attn.set_training(false) 済)
+        let attn_dropped = self.drop_attn.forward(&[attn_out]);
+        let x2: Vec<f32> = x_new
+            .iter()
+            .zip(attn_dropped[0].iter())
+            .map(|(a, b)| a + b)
+            .collect();
+
+        let single_x2 = vec![x2.clone()];
+        let norm2 = self.norm2.forward(&single_x2);
+        let ffn_out = self.ffn.forward(&norm2);
+        let ffn_dropped = self.drop_ffn.forward(&ffn_out);
+
+        x2.iter()
+            .zip(ffn_dropped[0].iter())
+            .map(|(a, b)| a + b)
+            .collect()
     }
 
     pub fn zero_grad(&mut self) {

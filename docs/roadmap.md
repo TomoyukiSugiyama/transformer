@@ -46,10 +46,20 @@ macOS の Accelerate と同じ構造 (`#[cfg(target_os = ...)]` 分岐) で `ope
 `d_model=512〜768` に拡大すると matmul の比率も問題サイズも大きくなり、
 Accelerate 単独効果が `1.7×` から **`2〜3×`** に伸びる見込み。
 
-## 推論時のキャッシュ機構 (KV cache)
-現在の `generate` は token 1 つ生成するたびに過去 token を含む全 context を attention で再計算。
-KV cache (Q/K/V の中間結果を保持) を導入すれば 1 token 生成あたりの計算量が
-`O(n)` → `O(1)` 近くまで下がる。 `max_len=128` 以上の生成で大きく効く。
+## 推論時のキャッシュ機構 (KV cache) ✅ 完了
+
+各 layer の `K` (RoPE 適用済) と `V` (未回転) を `KvCache` に保持し、
+1 token 生成あたりの計算量を `O(n²·d) → O(n·d)` に削減。
+詳細は [`docs/kv_cache.md`](kv_cache.md) を参照。
+
+- 実装: `src/kv_cache.rs`, `MultiHeadAttention::forward_step`,
+  `TransformerBlock::forward_step`, `Transformer::forward_step`,
+  `LanguageModel::generate_{top_k,top_p}_with_cache`
+- 学習パスは一切変更せず、 推論専用の並行 API として追加 (回帰リスクなし)
+- no-cache vs with-cache の **logit が 1e-3 以内 / argmax 完全一致** を単体テストで保証
+  (RoPE+RMS+SwiGLU / Sinusoidal+LN+GELU / RoPE+LN+GELU の 3 組合せで検証)
+- Sinusoidal PE / RoPE 両方に対応
+- 残り: KV cache truncation (max_len 超過時の sliding window 退避) は将来課題
 
 ## 生成制御の追加
 - ~~top-p (nucleus) sampling~~ → [Phase 5-1](phase5.md#phase-5-1-top-p-nucleus-sampling) で実装完了

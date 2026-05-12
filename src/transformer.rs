@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::feed_forward::FeedForwardKind;
+use crate::kv_cache::KvCache;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -78,6 +79,34 @@ impl Transformer {
             d1 = self.blocks[i].backward(&d1);
         }
         d1
+    }
+
+    /// 推論専用: 各層の `KvCache` をプロンプト用に作成する。
+    /// 容量は `max_len` (= 学習時の context window) に揃える。
+    pub fn init_kv_caches(&self, max_len: usize, d_model: usize) -> Vec<KvCache> {
+        (0..self.blocks.len())
+            .map(|_| KvCache::new(max_len, d_model))
+            .collect()
+    }
+
+    /// 推論専用: 1 token を全層通して前進。
+    /// `caches` は `init_kv_caches` で作った layer 数ぶんの cache を渡す。
+    pub fn forward_step(&mut self, x_new: &[f32], caches: &mut [KvCache]) -> Vec<f32> {
+        assert_eq!(
+            caches.len(),
+            self.blocks.len(),
+            "Transformer::forward_step: caches.len {} != n_layers {}",
+            caches.len(),
+            self.blocks.len()
+        );
+        let mut h = x_new.to_vec();
+        for (block, cache) in self.blocks.iter_mut().zip(caches.iter_mut()) {
+            h = block.forward_step(&h, cache);
+        }
+        // final_norm は (1, d_model) として扱う
+        let single = vec![h];
+        let normed = self.final_norm.forward(&single);
+        normed.into_iter().next().unwrap()
     }
 
     pub fn zero_grad(&mut self) {

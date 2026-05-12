@@ -7,6 +7,7 @@ mod embedding;
 mod eval;
 mod feed_forward;
 mod feed_forward_network;
+mod kv_cache;
 mod language_model;
 mod layer_normalization;
 mod matrix;
@@ -400,13 +401,29 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 5-3: 明治-大正 6 作家 (8.3M char) + max_len 512 + RMS+SwiGLU+RoPE
-    let cfg = Config::aozora_meiji_taisho_max512();
+    // let cfg = Config::aozora_meiji_taisho_d512_max512();
+    // let mut model = LanguageModel::load_inference_checkpoint(
+    //     "checkpoints/phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512/best.bin",
+    // )
+    // .unwrap();
+    // bench_kv_cache(&mut model, &cfg.prompts);
+
+    // Phase 5-4a: モデル拡大 d_model 384 → 512 (~20M params), 同コーパス (8.3M char)
+    // 期待: val_ppl 16-17 (Phase 5-3 baseline 18.71 から -8〜15%)
+    let cfg = Config::aozora_meiji_taisho_d512_max512();
     // training_and_inference(&cfg);
     inference_from_checkpoint(
         &cfg,
-        "checkpoints/phase5c_aozora_meiji_taisho_d384_n6_char_rms_swiglu_rope_max512/best.bin",
+        "checkpoints/phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512/best.bin",
     );
+
+    // Phase 5-3: 明治-大正 6 作家 (8.3M char) + max_len 512 + RMS+SwiGLU+RoPE
+    // ✅ 完了: best val_ppl 18.71 @ step 2800 (容量律速で Phase 5-2 17.76 を下回れず)
+    // let cfg = Config::aozora_meiji_taisho_max512();
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase5c_aozora_meiji_taisho_d384_n6_char_rms_swiglu_rope_max512/best.bin",
+    // );
 
     // Phase 5-2: 漱石 7 作品 + max_len 512 拡張 (✅ 完了, best val_ppl 17.76 @ step 600)
     // let cfg = Config::aozora_soseki_works_max512();
@@ -418,8 +435,7 @@ fn main() {
     // Phase 5-2 副次実験: max_len 512 + Sinusoidal PE (RoPE 効果の直接比較)
     // let cfg = Config::aozora_soseki_works_max512_sinusoidal();
 
-    // Phase 5-4a/b/c: モデル拡大 (Phase 5-3 完了後)
-    // let cfg = Config::aozora_meiji_taisho_d512_max512();      // 5-4a (~20M params)
+    // Phase 5-4b/c: 5-4a 完了後に有効化
     // let cfg = Config::aozora_meiji_taisho_d512_n8_max512();   // 5-4b (~26M params)
     // let cfg = Config::aozora_meiji_taisho_d768_max512();      // 5-4c (~50M params)
 
@@ -683,27 +699,82 @@ fn infer(model: &mut LanguageModel, prompts: &[&str]) {
     let repetition_penalty = 1.2;
     for prompt in prompts {
         println!("\n=== prompt: {:?} ===", prompt);
-        println!("\n--- top-k (k={top_k}, t={temperature}, rep={repetition_penalty}) ---");
-        println!(
-            "\n{}",
-            model.generate_top_k(
-                prompt,
-                max_new_token,
-                top_k,
-                temperature,
-                repetition_penalty
-            )
+
+        // top-k: KV cache 版を使用 (no-cache 版より高速、 出力サンプリング分布は同じ)
+        let t_topk = std::time::Instant::now();
+        let topk_text = model.generate_top_k_with_cache(
+            prompt,
+            max_new_token,
+            top_k,
+            temperature,
+            repetition_penalty,
         );
-        println!("\n--- top-p (p={top_p}, t={temperature}, rep={repetition_penalty}) ---");
+        let dt_topk = t_topk.elapsed();
         println!(
-            "\n{}",
-            model.generate_top_p(
-                prompt,
-                max_new_token,
-                top_p,
-                temperature,
-                repetition_penalty
-            )
+            "\n--- top-k (k={top_k}, t={temperature}, rep={repetition_penalty}, kv-cache) [{:.2}s] ---",
+            dt_topk.as_secs_f32()
         );
+        println!("\n{}", topk_text);
+
+        // top-p: KV cache 版
+        let t_topp = std::time::Instant::now();
+        let topp_text = model.generate_top_p_with_cache(
+            prompt,
+            max_new_token,
+            top_p,
+            temperature,
+            repetition_penalty,
+        );
+        let dt_topp = t_topp.elapsed();
+        println!(
+            "\n--- top-p (p={top_p}, t={temperature}, rep={repetition_penalty}, kv-cache) [{:.2}s] ---",
+            dt_topp.as_secs_f32()
+        );
+        println!("\n{}", topp_text);
     }
+}
+
+/// KV cache あり/なしの推論速度を比較するベンチマーク。 学習完了後に呼んで効果を確認するために。
+#[allow(dead_code)]
+fn bench_kv_cache(model: &mut LanguageModel, prompts: &[&str]) {
+    let max_new_token = 100;
+    let top_k = 5;
+    let temperature = 1.0;
+    let repetition_penalty = 1.2;
+    let mut total_no_cache = 0.0f32;
+    let mut total_with_cache = 0.0f32;
+    for prompt in prompts {
+        let t1 = std::time::Instant::now();
+        let _ = model.generate_top_k(
+            prompt,
+            max_new_token,
+            top_k,
+            temperature,
+            repetition_penalty,
+        );
+        let dt_no_cache = t1.elapsed().as_secs_f32();
+
+        let t2 = std::time::Instant::now();
+        let _ = model.generate_top_k_with_cache(
+            prompt,
+            max_new_token,
+            top_k,
+            temperature,
+            repetition_penalty,
+        );
+        let dt_with_cache = t2.elapsed().as_secs_f32();
+        let speedup = dt_no_cache / dt_with_cache.max(1e-6);
+        println!(
+            "prompt={:?}: no-cache={:.2}s, with-cache={:.2}s, speedup={:.2}x",
+            prompt, dt_no_cache, dt_with_cache, speedup
+        );
+        total_no_cache += dt_no_cache;
+        total_with_cache += dt_with_cache;
+    }
+    println!(
+        "\nTOTAL: no-cache={:.2}s, with-cache={:.2}s, speedup={:.2}x",
+        total_no_cache,
+        total_with_cache,
+        total_no_cache / total_with_cache.max(1e-6)
+    );
 }

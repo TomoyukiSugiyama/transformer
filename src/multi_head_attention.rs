@@ -8,6 +8,7 @@ use rand::rng;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
+use crate::kv_cache::KvCache;
 use crate::matrix::Matrix;
 use crate::rope::Rope;
 
@@ -205,6 +206,113 @@ impl MultiHeadAttention {
         dl_dx.add_in_place(&dl_dk.matmul(&self.w_k.transpose()));
         dl_dx.add_in_place(&dl_dv.matmul(&self.w_v.transpose()));
         dl_dx.to_jagged()
+    }
+
+    /// 推論専用 (KV cache あり) の 1 token 前進。
+    ///
+    /// `x_new` は単一 token の hidden state (`d_model` 長)。 内部キャッシュ (training 用)
+    /// は **触らない** ので、 学習・validation の途中に呼んでも副作用なし。
+    ///
+    /// 計算量 (1 step):
+    /// - Q/K/V projection: `O(d_model²)`
+    /// - attention: `O(cur_len · d_model)` (累積したキャッシュとの内積)
+    /// - 出力 projection: `O(d_model²)`
+    ///
+    /// 旧 `forward(seq_n+1)` は `O((n+1)² · d + (n+1) · d²)` だったので、
+    /// step 単位で **約 (n+1) 倍** 高速化される。
+    pub fn forward_step(&self, x_new: &[f32], cache: &mut KvCache) -> Vec<f32> {
+        assert_eq!(
+            x_new.len(),
+            self.d_model,
+            "MHA::forward_step: x_new len {} != d_model {}",
+            x_new.len(),
+            self.d_model
+        );
+
+        let dh = self.d_head;
+        let h_n = self.n_heads;
+
+        // 1 token を 1-row Matrix にして Q, K, V 投影。
+        // matmul は (1, d) × (d, d) なので m=1 の細長い形状だが、
+        // BLAS sgemm はこの形でも問題なく動く。
+        let x_m = Matrix::from_flat(x_new.to_vec(), 1, self.d_model);
+        let q = x_m.matmul(&self.w_q);
+        let k = x_m.matmul(&self.w_k);
+        let v = x_m.matmul(&self.w_v);
+
+        let mut q_data = q.data().to_vec();
+        let mut k_data = k.data().to_vec();
+        let v_data: &[f32] = v.data();
+
+        // RoPE: 新規 token の Q, K を **位置 cur_len** で head ごとに回転。
+        // 過去の K (cache.k) は append 時点で当時の位置の角度で回転済なので不変。
+        let pos = cache.cur_len();
+        if let Some(rope) = &self.rope {
+            for h in 0..h_n {
+                rope.apply_at_position(&mut q_data[h * dh..(h + 1) * dh], pos);
+                rope.apply_at_position(&mut k_data[h * dh..(h + 1) * dh], pos);
+            }
+        }
+
+        // 新しい K (回転済) と V を cache に追記。 これで cache.cur_len() == pos + 1。
+        cache.append(&k_data, v_data);
+
+        let n = cache.cur_len(); // = pos + 1
+        let cache_k = cache.k();
+        let cache_v = cache.v();
+        let scale = (dh as f32).sqrt();
+
+        // 各 head ごとに 「1 query × n key」 の attention を計算する。
+        // causal mask は **不要** — cache に入っているのは過去 + 自分自身だけ。
+        let mut concat = vec![0.0f32; self.d_model];
+        for h in 0..h_n {
+            let q_head: &[f32] = &q_data[h * dh..(h + 1) * dh];
+
+            // scores[j] = (q · K_j) / √d_head, j ∈ [0, n)
+            let mut scores = vec![0.0f32; n];
+            for j in 0..n {
+                let k_row = cache_k.row(j);
+                let k_slice = &k_row[h * dh..(h + 1) * dh];
+                let mut s = 0.0f32;
+                for i in 0..dh {
+                    s += q_head[i] * k_slice[i];
+                }
+                scores[j] = s / scale;
+            }
+
+            // softmax (n 要素のみ。 行列 softmax を呼び出すより手書きの方が割安)
+            let mut max = f32::NEG_INFINITY;
+            for &s in &scores {
+                if s > max {
+                    max = s;
+                }
+            }
+            let mut sum = 0.0f32;
+            for s in scores.iter_mut() {
+                *s = (*s - max).exp();
+                sum += *s;
+            }
+            let inv_sum = 1.0 / sum;
+            for s in scores.iter_mut() {
+                *s *= inv_sum;
+            }
+
+            // out_head[i] = Σ_j probs[j] * V_j[i]
+            let dst = &mut concat[h * dh..(h + 1) * dh];
+            for j in 0..n {
+                let p = scores[j];
+                let v_row = cache_v.row(j);
+                let v_slice = &v_row[h * dh..(h + 1) * dh];
+                for i in 0..dh {
+                    dst[i] += p * v_slice[i];
+                }
+            }
+        }
+
+        // Output projection: (1, d_model) × (d_model, d_model) = (1, d_model)
+        let concat_m = Matrix::from_flat(concat, 1, self.d_model);
+        let output = concat_m.matmul(&self.w_o);
+        output.data().to_vec()
     }
 
     pub fn zero_grad(&mut self) {
