@@ -36,6 +36,7 @@ pub struct LanguageModel {
 }
 
 impl LanguageModel {
+    #[allow(dead_code)]
     pub fn new(
         corpus_text: &str,
         tokenizer_kind: TokenizerKind,
@@ -51,6 +52,35 @@ impl LanguageModel {
         dropout_p: f32,
     ) -> Self {
         let tokenizer = train_tokenizer(tokenizer_kind, corpus_text, vocab_size);
+        Self::from_tokenizer(
+            tokenizer,
+            normalization_kind,
+            feed_forward_kind,
+            positional_encoding_kind,
+            d_model,
+            n_heads,
+            d_ff,
+            n_layers,
+            max_len,
+            dropout_p,
+        )
+    }
+
+    /// 既に構築済みのトークナイザを使ってモデルを構築する。
+    /// キャッシュからロードした BPE などを使う場合に呼ぶ。
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_tokenizer(
+        tokenizer: Box<dyn Tokenizer>,
+        normalization_kind: NormalizationKind,
+        feed_forward_kind: FeedForwardKind,
+        positional_encoding_kind: PositionalEncodingKind,
+        d_model: usize,
+        n_heads: usize,
+        d_ff: usize,
+        n_layers: usize,
+        max_len: usize,
+        dropout_p: f32,
+    ) -> Self {
         let vocab_size = tokenizer.vocab_size();
         let pad_id = tokenizer.pad_id();
         let pe = match positional_encoding_kind {

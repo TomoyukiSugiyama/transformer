@@ -1,5 +1,6 @@
 mod adam_w;
 mod bpe_tokenizer;
+mod char_bpe_tokenizer;
 mod char_tokenizer;
 mod cross_entropy_loss;
 mod dropout;
@@ -36,7 +37,10 @@ use crate::{
     adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
     lr_scheduler::LrScheduler, multi_head_attention::MultiHeadAttention,
     normalization::NormalizationKind, positional_encoding::PositionalEncodingKind,
-    tokenizer::TokenizerKind,
+    tokenizer::{
+        Tokenizer, TokenizerKind, load_tokenizer_from_file, save_tokenizer_to_file,
+        train_tokenizer, train_tokenizer_with_coverage,
+    },
 };
 
 /// コーパスを生のテキストとして読み込む（改行・空行を含む元の構造を保つ）
@@ -58,6 +62,63 @@ fn load_corpus_split(path: &str, val_ratio: f32) -> (String, String) {
     let train: String = chars[..split].iter().collect();
     let val: String = chars[split..].iter().collect();
     (train, val)
+}
+
+/// `cfg.tokenizer_cache_path()` にトークナイザが保存済みならロードし、 そうでなければ学習して保存する。
+/// `merge_sample_chars` が `Some(n)` のとき、 BPE / CharBpe の merge 学習は先頭 `n` char のサンプルで実施し、
+/// 全 char カバレッジは `corpus_text` 全体で保証する (`train_tokenizer_with_coverage`)。
+fn build_or_load_tokenizer(cfg: &Config, corpus_text: &str) -> Box<dyn Tokenizer> {
+    let cache_path = cfg.tokenizer_cache_path();
+    if std::path::Path::new(&cache_path).exists() {
+        let t0 = Instant::now();
+        match load_tokenizer_from_file(&cache_path) {
+            Ok(tok) => {
+                println!(
+                    "# loaded cached tokenizer from {cache_path} (vocab={}) in {:.2}s",
+                    tok.vocab_size(),
+                    t0.elapsed().as_secs_f32()
+                );
+                return tok;
+            }
+            Err(e) => {
+                eprintln!(
+                    "# WARN: failed to load tokenizer cache ({cache_path}): {e}. retraining..."
+                );
+            }
+        }
+    }
+
+    let t0 = Instant::now();
+    let tokenizer = if let Some(sample_chars) = cfg.merge_sample_chars {
+        let sample_text: String = corpus_text.chars().take(sample_chars).collect();
+        println!(
+            "# training tokenizer: kind={:?}, vocab_size={}, sample_chars={} (coverage on full {} chars)",
+            cfg.tokenizer_kind,
+            cfg.vocab_size,
+            sample_text.chars().count(),
+            corpus_text.chars().count(),
+        );
+        train_tokenizer_with_coverage(cfg.tokenizer_kind, &sample_text, corpus_text, cfg.vocab_size)
+    } else {
+        println!(
+            "# training tokenizer: kind={:?}, vocab_size={} (full corpus, {} chars)",
+            cfg.tokenizer_kind,
+            cfg.vocab_size,
+            corpus_text.chars().count(),
+        );
+        train_tokenizer(cfg.tokenizer_kind, corpus_text, cfg.vocab_size)
+    };
+    let train_secs = t0.elapsed().as_secs_f32();
+    println!(
+        "# tokenizer trained in {train_secs:.1}s (vocab={})",
+        tokenizer.vocab_size()
+    );
+
+    match save_tokenizer_to_file(tokenizer.as_ref(), &cache_path) {
+        Ok(()) => println!("# saved tokenizer cache to {cache_path}"),
+        Err(e) => eprintln!("# WARN: failed to save tokenizer cache to {cache_path}: {e}"),
+    }
+    tokenizer
 }
 
 struct Config {
@@ -94,6 +155,10 @@ struct Config {
     /// AdamW の beta2。 1 step あたり tokens が少ないコーパスでは 0.99 が推奨。
     beta2: f32,
     prompts: Vec<&'static str>,
+    /// `CharBpe` の merge 学習に使う char 数 (先頭からサンプリング)。
+    /// `None` のときコーパス全体で学習。 サンプル学習で速度を稼ぐ場合に `Some(500_000)` 等を指定。
+    /// `Char` / `Bpe` では無視される。
+    merge_sample_chars: Option<usize>,
 }
 
 impl Config {
@@ -128,6 +193,7 @@ impl Config {
             weight_decay: 0.01,
             beta2: 0.999,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -164,6 +230,7 @@ impl Config {
             weight_decay: 0.1,
             beta2: 0.99,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -207,6 +274,7 @@ impl Config {
             weight_decay: 0.1,
             beta2: 0.99,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -247,6 +315,7 @@ impl Config {
             weight_decay: 0.1,
             beta2: 0.99,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -290,6 +359,7 @@ impl Config {
             weight_decay: 0.1,
             beta2: 0.99,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -351,6 +421,7 @@ impl Config {
             weight_decay: 0.1,
             beta2: 0.99,
             prompts,
+            merge_sample_chars: None,
         }
     }
 
@@ -396,11 +467,80 @@ impl Config {
         cfg
     }
 
+    /// Phase 6-a: Phase 5-4a と同一アーキ (d=512, n_layers=6) で **tokenizer を char-level BPE** に切替。
+    /// 期待効果: BPE merge により 1 token あたり char 数が増え、 同じ max_len=512 で
+    /// **実質的な context window が ~1.8x に拡張**。 さらに頻出 n-gram (「ので」 「ました」 「先生」 等) が
+    /// 1 token になることで bigram 切り誤り (例: "ある日本") の減少が期待される。
+    ///
+    /// vocab_size = 8000 (Phase 5-4a の char vocab 5,220 + merges ~2,780)。
+    /// max_len は char 比較を公平にするため 512 のまま (1 token ≈ 1.8 char なので実質 ~922 char)。
+    ///
+    /// 注意: `val_ppl` の **絶対値** は char tokenizer と比較不能 (vocab inflation で大きくなる)。
+    /// 公平比較は **BPC (bits/char)** で行う。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_charbpe8k_max512() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_d512_max512();
+        cfg.run_name = "phase6a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max512";
+        cfg.tokenizer_kind = TokenizerKind::CharBpe;
+        cfg.vocab_size = 8000;
+        // BPE 学習は 500K char サンプルで実施 (フル 8.3M だと merge per iter のコストが大、 1+ 時間)。
+        // 高頻度 n-gram は 500K サンプルで十分に統計収束する (実測確認済)。
+        // 全 char カバレッジは全コーパスで保証 (`train_with_coverage`)。
+        cfg.merge_sample_chars = Some(500_000);
+        cfg
+    }
+
+    /// Phase 6-b: より大きな merge 数で sequence 圧縮を強める (vocab=16K)。
+    /// 期待: 1 token ≈ 2.5 char、 実質 context ~1,280 char。
+    /// ただし vocab 増加分のパラメータ (~4M) と val_ppl の値域が変わる点に注意。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_charbpe16k_max512() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max512();
+        cfg.run_name = "phase6b_aozora_meiji_taisho_d512_n6_charbpe16k_rms_swiglu_rope_max512";
+        cfg.vocab_size = 16000;
+        // vocab=16000 だと merge 数 ~10,774。 サンプル拡大して品質を確保。
+        cfg.merge_sample_chars = Some(1_000_000);
+        cfg
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
+
+    /// トークナイザの永続化パスを返す (再現性のため kind / vocab / sample / corpus 名を埋め込む)。
+    /// 同じパラメータの再実行ではこの cache をロードして BPE 学習時間を 5-15 分節約する。
+    /// `tokenizer_kind` ごとに用途が違うので Char はキャッシュ不要 (即時)、 BPE/CharBpe のみ恩恵あり。
+    fn tokenizer_cache_path(&self) -> String {
+        let kind = match self.tokenizer_kind {
+            TokenizerKind::Bpe => "bpe",
+            TokenizerKind::Char => "char",
+            TokenizerKind::CharBpe => "charbpe",
+        };
+        let corpus_stem = std::path::Path::new(self.corpus_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("corpus");
+        let sample = self
+            .merge_sample_chars
+            .map(|n| format!("_s{n}"))
+            .unwrap_or_default();
+        format!(
+            "tokenizers/{kind}_v{}_{corpus_stem}{sample}.bin",
+            self.vocab_size
+        )
+    }
 }
 fn main() {
+    // Phase 6-a: char-level BPE トークナイザ (vocab=8000) + Phase 5-4a と同じモデル (d=512, L=6)
+    // BPE 学習は 500K char サンプルで実施 (5.3 min)、 2 回目以降は cache から即ロード。
+    // 期待: 1 token あたり ~1.56 char、 実質 context ~800 char (Phase 5-4a の 512 char から +56%)、
+    //       BPC 4.18 (Phase 5-4a) より低下するかが評価の本質。
+    let cfg = Config::aozora_meiji_taisho_charbpe8k_max512();
+    training_and_inference(&cfg);
+
+    // Phase 6-a tokenizer の cache 経由動作確認 (training 起動前にトークナイザだけ試したいとき):
+    // bench_tokenizer_with_cache(&cfg);
+
     // let cfg = Config::aozora_meiji_taisho_d512_max512();
     // let mut model = LanguageModel::load_inference_checkpoint(
     //     "checkpoints/phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512/best.bin",
@@ -409,13 +549,13 @@ fn main() {
     // bench_kv_cache(&mut model, &cfg.prompts);
 
     // Phase 5-4a: モデル拡大 d_model 384 → 512 (~20M params), 同コーパス (8.3M char)
-    // 期待: val_ppl 16-17 (Phase 5-3 baseline 18.71 から -8〜15%)
-    let cfg = Config::aozora_meiji_taisho_d512_max512();
+    // ✅ 完了: best val_ppl 18.16 @ step 2800, BPC 4.18 (全 phase 最高)
+    // let cfg = Config::aozora_meiji_taisho_d512_max512();
     // training_and_inference(&cfg);
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512/best.bin",
-    );
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512/best.bin",
+    // );
 
     // Phase 5-3: 明治-大正 6 作家 (8.3M char) + max_len 512 + RMS+SwiGLU+RoPE
     // ✅ 完了: best val_ppl 18.71 @ step 2800 (容量律速で Phase 5-2 17.76 を下回れず)
@@ -631,13 +771,12 @@ fn run_training_loop(
 #[allow(dead_code)]
 fn training_and_inference(cfg: &Config) {
     let (train_text, val_text) = load_corpus_split(cfg.corpus_path, cfg.val_split_ratio);
-    let mut model = LanguageModel::new(
-        &train_text,
-        cfg.tokenizer_kind,
+    let tokenizer = build_or_load_tokenizer(cfg, &train_text);
+    let mut model = LanguageModel::from_tokenizer(
+        tokenizer,
         cfg.normalization_kind,
         cfg.feed_forward_kind,
         cfg.positional_encoding_kind,
-        cfg.vocab_size,
         cfg.d_model,
         cfg.n_heads,
         cfg.d_ff,
@@ -777,4 +916,54 @@ fn bench_kv_cache(model: &mut LanguageModel, prompts: &[&str]) {
         total_with_cache,
         total_no_cache / total_with_cache.max(1e-6)
     );
+}
+
+/// Phase 6 tokenizer の妥当性チェック。 `cfg.tokenizer_cache_path()` の cache を経由する。
+/// 1 回目: 学習 + save。 2 回目: load (ms オーダー)。
+/// 学習後に圧縮率と merge 例をレポートする。
+#[allow(dead_code)]
+fn bench_tokenizer_with_cache(cfg: &Config) {
+    let text = fs::read_to_string(cfg.corpus_path).expect("failed to read corpus");
+    let char_count = text.chars().count();
+    println!(
+        "# bench_tokenizer_with_cache: corpus={}, kind={:?}, vocab={}, sample={:?}",
+        cfg.corpus_path, cfg.tokenizer_kind, cfg.vocab_size, cfg.merge_sample_chars
+    );
+    println!("# corpus chars = {char_count} ({} bytes)", text.len());
+
+    let tokenizer = build_or_load_tokenizer(cfg, &text);
+
+    let t1 = Instant::now();
+    let ids = tokenizer.encode_long(&text);
+    let encode_secs = t1.elapsed().as_secs_f32();
+    let token_count = ids.len();
+    let chars_per_token = char_count as f32 / token_count.max(1) as f32;
+    println!(
+        "# corpus encoded in {encode_secs:.1}s: {token_count} tokens ({:.2} chars/token)",
+        chars_per_token
+    );
+    println!(
+        "# effective context @ max_len={}: {:.0} chars (vs char tokenizer = {} chars)",
+        cfg.max_len,
+        chars_per_token * cfg.max_len as f32,
+        cfg.max_len
+    );
+
+    let decoded = tokenizer.decode(&ids);
+    let chars_match = decoded.chars().count();
+    if decoded == text {
+        println!("# decode roundtrip: OK (lossless, {chars_match} chars)");
+    } else {
+        let prefix: String = decoded.chars().take(80).collect();
+        println!(
+            "# decode roundtrip: MISMATCH (orig={char_count} chars, decoded={chars_match} chars). decoded prefix: {prefix:?}"
+        );
+    }
+
+    // CharBpe の場合のみ merge 例を表示
+    if cfg.tokenizer_kind == TokenizerKind::CharBpe {
+        // tokenizer は Box<dyn Tokenizer> なので concrete メソッドは呼べない。
+        // merge 例はキャッシュファイルに保存された情報からも辿れるので、 別途確認すれば良い。
+        println!("\n# (top merges: see {} or rerun bench with concrete CharBpeTokenizer)", cfg.tokenizer_cache_path());
+    }
 }

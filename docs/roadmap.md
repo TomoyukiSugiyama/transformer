@@ -28,9 +28,22 @@
 | 5-1 | top-p (nucleus) sampling | 18.84 (変わらず、 体感品質は限定的) | ✅ 完了 |
 | 5-2 | max_len 256 → 512 | **17.76 (実測, vs 4b -5.0%)** | ✅ 完了 |
 | 5-3 | コーパス拡大 1M → 8.3M char (5 作家追加) | **18.71 (実測, 想定外悪化)** — モデル容量律速の反証 | ✅ 完了 |
-| 5-4 | モデル拡大 d_model 384 → 512/768 (3 段階) | 13〜17 (5-3 比 -8〜30%) | 🚧 5-4a 着手 |
+| 5-4a | モデル拡大 d_model 384 → **512** (~20M params) | **18.16 (実測, 5-3 比 -2.9%, BPC 8.17 全 phase 最高)** | ✅ 完了 |
+| 5-4b/c | モデル拡大 d=512+L8 / d=768 | 13〜17 | 📋 判断保留 |
 
 詳細は [docs/phase5.md](phase5.md) を参照。
+
+## トークナイザ刷新 (Phase 6) — 着手中
+
+Phase 5-4a 完了後、 質的課題 (bigram 切り誤り、 短コンテキスト、 文体一貫性) を **トークナイザ側** で改善するアプローチ。
+
+| 段階 | 項目 | 期待 | 状態 |
+|------|------|------|------|
+| 6-a | Unicode char-level BPE (vocab 8K) | 1 token ~1.8 char, 実質 context ~922 char, BPC < 4.18 | 🚧 実装完了、 学習未実施 |
+| 6-b | Unicode char-level BPE (vocab 16K) | 1 token ~2.5 char, 実質 context ~1,280 char | 📋 計画 |
+
+実装: `src/char_bpe_tokenizer.rs` (新規、 byte-level の既存 BPE は英語用に保持)。
+詳細は [docs/phase6.md](phase6.md) を参照。
 
 ## 過学習の更なる抑制
 - **attention dropout の追加** ([Phase 3](phase3.md) で導入したのは residual 直前の 2 箇所のみ)。
