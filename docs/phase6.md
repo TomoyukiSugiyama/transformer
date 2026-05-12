@@ -25,6 +25,10 @@
 
 ### Unicode char-level BPE (`src/char_bpe_tokenizer.rs`)
 
+![Tokenizer Family — 3 implementations + CharBPE (NEW)](tokenizer-family.png)
+
+上図は `Tokenizer` trait を実装する 3 種類のトークナイザの比較。 **CharBpeTokenizer** が Phase 6 で新規追加した実装で、 既存の `CharTokenizer` / `BpeTokenizer` と並列で `TokenizerKind` enum 経由で選択できる。 特殊 token (`<PAD>` / `<UNK>` / `<BOS>` / `<EOS>`) の ID 0-3 は 3 実装で共通。
+
 | 項目 | byte-level BPE (既存) | **char-level BPE (Phase 6)** |
 |------|--------------------|----------------------------|
 | 初期トークン単位 | byte (`b099` 形式) | **Unicode char そのもの** |

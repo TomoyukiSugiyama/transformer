@@ -3,6 +3,10 @@
 > **目的**: 自己回帰生成 (autoregressive decoding) の per-token 計算量を
 > `O(n²·d)` → `O(n·d)` に削減する。
 
+![Inference Pipeline with KV Cache](inference-pipeline.png)
+
+上図は `language_model.rs` + `kv_cache.rs` で構成される推論パイプライン全体。 左ペインが checkpoint ロードから生成テキスト出力までのフロー、 右ペインが per-layer の `KvCache` の内部構造を示す。 以下は各要素の詳細解説。
+
 ## なぜ KV cache が必要か
 
 通常の forward は **「prompt + 既生成 token 全部」** を入力として、 全位置の attention を

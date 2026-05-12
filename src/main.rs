@@ -536,7 +536,11 @@ fn main() {
     // 期待: 1 token あたり ~1.56 char、 実質 context ~800 char (Phase 5-4a の 512 char から +56%)、
     //       BPC 4.18 (Phase 5-4a) より低下するかが評価の本質。
     let cfg = Config::aozora_meiji_taisho_charbpe8k_max512();
-    training_and_inference(&cfg);
+    // training_and_inference(&cfg);
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase6a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max512/best.bin",
+    );
 
     // Phase 6-a tokenizer の cache 経由動作確認 (training 起動前にトークナイザだけ試したいとき):
     // bench_tokenizer_with_cache(&cfg);

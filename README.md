@@ -11,7 +11,10 @@ Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推�
 
 GPT 系の **decoder-only 構成** で、 入力テキストを次のように処理する:
 
-1. **Tokenizer**: BPE (byte-level) または Char-level でトークン ID 列に変換 ([`bpe_tokenizer.rs`](src/bpe_tokenizer.rs) / [`char_tokenizer.rs`](src/char_tokenizer.rs))
+1. **Tokenizer**: 3 種類から選択 ([`tokenizer.rs`](src/tokenizer.rs))
+   - **Char** ([`char_tokenizer.rs`](src/char_tokenizer.rs)) — 1 文字 1 トークン (小規模英語 / ASCII 向け)
+   - **BPE** ([`bpe_tokenizer.rs`](src/bpe_tokenizer.rs)) — byte-level BPE (英語向け、 GPT-2 系)
+   - **CharBPE** ([`char_bpe_tokenizer.rs`](src/char_bpe_tokenizer.rs)) — Unicode char-level BPE (日本語向け、 Phase 6 で導入、 詳細は [docs/phase6.md](docs/phase6.md))
 2. **Token Embedding** (vocab × d_model): 各トークン ID を密ベクトルに射影 ([`embedding.rs`](src/embedding.rs))
 3. **Positional Encoding**: 位置情報の注入を切替可能
    - **Sinusoidal PE** ([`sinusoidal_pe.rs`](src/sinusoidal_pe.rs)) — Embedding に加算する古典方式
@@ -60,6 +63,35 @@ Pre-Norm は Post-Norm に比べて **大規模モデルでの学習が安定** 
 
 損失は **クロスエントロピー (PAD は除外)** ([`cross_entropy_loss.rs`](src/cross_entropy_loss.rs))、 オプティマイザは AdamW 固定 (β1=0.9, β2=0.99 推奨)。
 LR スケジューラと AdamW の数式・実装値は [`docs/tuning.md`](docs/tuning.md) に詳述。
+
+### Tokenizer ファミリー
+
+![Tokenizer Family — 3 implementations + CharBPE (NEW)](docs/tokenizer-family.png)
+
+`Tokenizer` trait ([`tokenizer.rs`](src/tokenizer.rs)) に対して **3 実装** を持ち、 `TokenizerKind` enum で切替える。 特殊 token (`<PAD>` / `<UNK>` / `<BOS>` / `<EOS>`) の ID は 0-3 で固定。
+
+| 実装 | 単位 | 日本語安全 | lossless decode | subword 圧縮 | 拡張 API |
+|------|------|----------|----------------|------------|---------|
+| **CharTokenizer** ([`char_tokenizer.rs`](src/char_tokenizer.rs)) | 1 Unicode char | ✅ | ✅ | ❌ | ❌ |
+| **BpeTokenizer** ([`bpe_tokenizer.rs`](src/bpe_tokenizer.rs)) | byte-level BPE subword | ❌ (UTF-8 境界跨ぎ) | ❌ | ✅ | ❌ |
+| **CharBpeTokenizer** ⭐ ([`char_bpe_tokenizer.rs`](src/char_bpe_tokenizer.rs)) | **Unicode char-level BPE** | ✅ | ✅ | ✅ | ✅ (`extend_merges` / `extend_coverage`) |
+
+CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスでの圧縮率と長文コンテキストを両立する。 SentencePiece と同方針で `</w>` マーカーは持たず、 空白も独立トークンとして保持するため decode は完全に lossless。 詳細は [docs/phase6.md](docs/phase6.md) を参照。
+
+### 推論パイプライン (KV Cache)
+
+![Inference Pipeline with KV Cache](docs/inference-pipeline.png)
+
+自己回帰生成では同じ過去 token に対して K, V を毎 step 再計算するのが無駄なため、 **`KvCache`** ([`kv_cache.rs`](src/kv_cache.rs)) で per-layer / per-head のキャッシュを持ち、 per-token 計算量を `O(n²·d) → O(n·d)` に削減している:
+
+1. **Load checkpoint** ([`checkpoint.rs`](src/checkpoint.rs)) — `best.bin` / `inference.bin` の重みを復元
+2. **Tokenize prompt** — `tokenizer.encode_prompt()` で `[BOS, t₁, ..., tₙ]` に変換
+3. **Init KV cache per layer** — `Transformer::init_kv_caches(max_len)` で容量を確保
+4. **Prefill** — プロンプト全 token を 1 つずつ `forward_step` に流して cache に積む
+5. **Generate loop** — 直前 token 1 つだけを `forward_step` に渡して logits を取り、 sampling (top-k / top-p / greedy) で次 token を選択、 EOS で打ち切り
+6. **Decode** — `tokenizer.decode(&ids)` でテキスト復元
+
+`KvCache` は **K のみ RoPE 適用後** を保管 (位置依存の回転を再計算しないため)、 **V は raw** で保管。 詳細実装は [`docs/kv_cache.md`](docs/kv_cache.md) を参照。
 
 ## ドキュメント
 
@@ -226,9 +258,11 @@ src/
 ├── adam_w.rs                  # AdamW オプティマイザ (weight decay / β2 設定可)
 ├── lr_scheduler.rs            # warmup + cosine スケジューラ
 ├── cross_entropy_loss.rs      # 系列全体のクロスエントロピー損失 (PAD は loss から除外)
-├── tokenizer.rs               # Tokenizer trait と TokenizerKind enum (BPE / Char の切替)
-├── bpe_tokenizer.rs           # BPE トークナイザ (byte-level + 句読点 split)
+├── tokenizer.rs               # Tokenizer trait と TokenizerKind enum (Char / BPE / CharBPE の切替)
+├── bpe_tokenizer.rs           # BPE トークナイザ (byte-level + 句読点 split、 英語向け)
 ├── char_tokenizer.rs          # 文字単位トークナイザ (vocab はコーパス文字種から自動生成)
+├── char_bpe_tokenizer.rs      # Unicode char-level BPE (日本語向け、 lossless decode) ※Phase 6 で組込済
+├── kv_cache.rs                # KV キャッシュ (per-layer K/V を保持、 推論を O(n²d)→O(nd) に削減)
 ├── eval.rs                    # 学習中の val_loss 計測 (90/10 split + ランダム窓)
 ├── checkpoint.rs              # 重み・状態の保存/読込
 └── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
@@ -258,6 +292,13 @@ docs/                              # 詳細ドキュメント (本 README から
 ├── phase5.md                      # 生成品質向上 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大)
 ├── phase6.md                      # トークナイザ刷新 (char → Unicode char-level BPE)
 ├── roadmap.md                     # 今後の改善案
+├── kv_cache.md                    # KV cache の実装解説
+├── sota_comparison.md             # SoTA LLM との要素別比較
+├── architecture-overview.png      # 全体図 (本 README 冒頭)
+├── transformer-block-detail.png   # TransformerBlock 内部詳細図
+├── training-pipeline.png          # 学習パイプライン図
+├── tokenizer-family.png           # Tokenizer 3 実装の比較図
+├── inference-pipeline.png         # 推論パイプライン (KV cache) 図
 ├── learning_rate.png              # tuning.md から参照
 └── lr_schedule.png                # tuning.md から参照
 
