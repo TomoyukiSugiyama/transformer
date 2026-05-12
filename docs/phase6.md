@@ -31,9 +31,9 @@
 | 日本語安全性 | UTF-8 境界跨ぎでマージされる可能性あり ❌ | char 境界で必ず止まる ✅ |
 | 空白の扱い | 廃棄 (decode で再構築) | **独立トークンとして保持** (lossless) |
 | 小文字化 | あり (`.to_lowercase()`) | なし (case を保持) |
-| 初期 vocab | 特殊 4 + 256 byte × 2 (plain / `</w>`) | 特殊 4 + ユニーク char × 2 (plain / `</w>`) |
-| `</w>` の役割 | 単語境界マーカー (旧来 BPE 流) | 同じ。 単一 char 単語 (空白・句読点) には付与しない |
-| decode の正確性 | 単語間にスペース挿入の heuristic → 日本語で誤動作 | **完全に lossless** (token 連結 + `</w>` 除去のみ) |
+| 初期 vocab | 特殊 4 + 256 byte × 2 (plain / `</w>`) = **516** | 特殊 4 + ユニーク char (plain のみ) = **~5,226** (日本語 corpus 実測) |
+| `</w>` 単語末尾マーカー | あり (英語の word-final/internal の subword 区別に有用) | **不採用** (日本語は空白で語を区切らないため旨味薄、 初期 vocab を半減できる、 SentencePiece と同方針) |
+| decode の正確性 | 単語間にスペース挿入の heuristic → 日本語で誤動作 | **完全に lossless** (token をそのまま連結するだけ。 空白・句読点は独立トークンとして保持済) |
 
 主要 API:
 
