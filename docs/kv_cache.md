@@ -93,8 +93,72 @@ pub fn forward_step(&mut self, x_new: &[f32], caches: &mut [KvCache]) -> Vec<f32
 | FFN | `O(n · d · d_ff)` | `O(d · d_ff)` | n |
 | **合計 per step** | `O(n · d² + n² · d)` | `O(d² + n · d)` | **≈ n** (大規模 n で) |
 
-理論上、 `n=100` の生成で約 **100 倍** 高速化。 実測値は constants と memory bandwidth で
-30-50 倍程度に落ちることが多い。
+## 実測 (Phase 5-4a step_000800.bin / **d=512**, n_layers=6, M1 Max + Accelerate)
+
+8 prompt 平均で `max_new_token` を変えてベンチ (`bench_kv_cache`):
+
+| max_new | no-cache total | with-cache total | speedup | **no-cache ms/tok** | **with-cache ms/tok** |
+|---------|---------------|------------------|---------|---------------------|------------------------|
+| 100 | 14.0 s | 2.97 s | 4.71x | 17.5 | **3.7** |
+| 200 | 42.3 s | 6.47 s | 6.55x | 26.4 | **4.0** |
+| 400 | 145.0 s | 13.03 s | **11.13x** | 45.3 | **4.1** |
+
+### 重要な観察
+
+**with-cache の per-token 時間は max_new_token によらずほぼ一定 (~4 ms)**。
+これは KV cache が **理論通りに機能している** ことの直接的な証拠:
+
+- **no-cache**: per-token cost が `O(n)` で線形増加 (17.5 → 26.4 → 45.3)
+- **with-cache**: per-token cost が constant (3.7 → 4.0 → 4.1) — 微増は attention の `O(n)` 項
+
+その結果、 **絶対 speedup は max_new_token に比例して伸びる**:
+
+| max_new | 実測 speedup | 理論上限 (avg_seq_len) | 実効率 |
+|---------|-------------|-----------------------|-------|
+| 100 | 4.71x | ~50x | 9% |
+| 200 | 6.55x | ~100x | 7% |
+| 400 | 11.13x | ~200x | 6% |
+| 800 (予測) | ~18x | ~400x | — |
+| 1600 (予測) | ~30x | ~800x | — |
+
+理論上限との比は 6-9% と低いが、 **重要なのは線形 → 定数の漸近挙動が達成されていること**。
+
+### per-token ~4 ms を構成する固定コストの内訳 (推定)
+
+with-cache が n に依存しないということは、 4 ms は以下の **n 非依存な部分** で構成されている:
+
+| 順位 | コンポーネント | 推定 ms |
+|------|---------------|---------|
+| 1 | `Vec<Vec<f32>>` ⇄ `Matrix` 変換のヒープ確保 (norm/ffn を 1-row Vec で呼ぶたび) | 1.5-2.0 |
+| 2 | per-layer の matmul (Q/K/V/O + FFN gate/up/down) で `m=1` の BLAS dispatch overhead | 1.0-1.5 |
+| 3 | RoPE の per-head 回転 + concat | 0.3 |
+| 4 | output_head の logits projection | 0.3 |
+| 5 | `KvCache::append` の memcpy + scalar attention loop | 0.3 |
+
+### 適用範囲の判断
+
+| 用途 | 推奨 |
+|-----|------|
+| 短文生成 (max_new ≤ 100) | 4-5x で十分実用的、 そのまま使う |
+| 中長文生成 (max_new = 200-400) | 6-11x、 体感で大幅な改善 |
+| 長文生成 (max_new ≥ 800) | 18x+ 期待、 Phase 6 最適化なしでも十分 |
+| max_len ぎりぎりの生成 | sliding window 未実装なので注意 (early-stop) |
+
+### 残り最適化候補 (Phase 6 で着手予定、 4.71x → 20-30x の見込み)
+
+> 4.71x は max_new=100 で per-prompt 1.4 秒短縮 = 実用上十分な改善。
+> 追加最適化は 「将来推論速度が再びボトルネックになった時」 に着手する。
+
+優先度を **再推定後のボトルネック順** に並べ直すと:
+
+1. ★ **Norm / FFN に `forward_one(&[f32]) -> Vec<f32>`** 最優先  
+   `Vec<Vec<f32>>` ⇄ `Matrix` 変換を完全に回避。 ボトルネック #1 を直撃する。
+2. **`KvCache` を pre-allocated buffer 化**: append が末尾追記だけに (memcpy 不要)
+3. **per-head attention を BLAS 化** (`(1, d_h) × (d_h, n)`)
+4. **QKV projection 融合**: `(1, d) × (d, 3d)` の 1 matmul (副次効果)
+5. **prefill を 1 回の forward で**: 短プロンプト (10 token 以下) ではほぼ無視可
+
+これらは [`roadmap.md`](roadmap.md) の Phase 6 候補として保留。
 
 ## 正当性検証
 

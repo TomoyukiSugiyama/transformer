@@ -46,7 +46,7 @@ macOS の Accelerate と同じ構造 (`#[cfg(target_os = ...)]` 分岐) で `ope
 `d_model=512〜768` に拡大すると matmul の比率も問題サイズも大きくなり、
 Accelerate 単独効果が `1.7×` から **`2〜3×`** に伸びる見込み。
 
-## 推論時のキャッシュ機構 (KV cache) ✅ 完了
+## 推論時のキャッシュ機構 (KV cache) ✅ 完了 (4.71x speedup @ d=512)
 
 各 layer の `K` (RoPE 適用済) と `V` (未回転) を `KvCache` に保持し、
 1 token 生成あたりの計算量を `O(n²·d) → O(n·d)` に削減。
@@ -57,9 +57,27 @@ Accelerate 単独効果が `1.7×` から **`2〜3×`** に伸びる見込み。
   `LanguageModel::generate_{top_k,top_p}_with_cache`
 - 学習パスは一切変更せず、 推論専用の並行 API として追加 (回帰リスクなし)
 - no-cache vs with-cache の **logit が 1e-3 以内 / argmax 完全一致** を単体テストで保証
-  (RoPE+RMS+SwiGLU / Sinusoidal+LN+GELU / RoPE+LN+GELU の 3 組合せで検証)
 - Sinusoidal PE / RoPE 両方に対応
-- 残り: KV cache truncation (max_len 超過時の sliding window 退避) は将来課題
+- **実測** (Phase 5-4a step_000800.bin, d=512, n_layers=6, M1 Max + Accelerate, 8 prompt 平均):
+  - `max_new=100`: **4.71x** (no-cache 17.5 ms/tok → with-cache 3.7 ms/tok)
+  - `max_new=200`: **6.55x** (no-cache 26.4 ms/tok → with-cache 4.0 ms/tok)
+  - `max_new=400`: **11.13x** (no-cache 45.3 ms/tok → with-cache 4.1 ms/tok)
+- **with-cache の per-token 時間は max_new に対し ほぼ定数 (~4 ms)** = KV cache が理論通り機能 ✅
+- 絶対 speedup は max_new に **線形に伸びる** (n が大きいほど効果絶大)。
+  4 ms の固定コストは `Vec<Vec<f32>>` 変換 + m=1 BLAS dispatch + RoPE + alloc
+
+### KV cache 追加最適化 (Phase 6 候補、 後回し)
+
+> 現行 4.71x は実用上十分なので Phase 5 の優先タスクからは外す。
+> 以下は将来 「推論速度がボトルネックになった時」 に着手する。
+
+実装優先順 (推定効果の合計で 4.71x → 20-30x まで伸ばせる見込み):
+- ★ **Norm/FFN に `forward_one(&[f32])`** 追加 (`Vec<Vec<f32>>` 変換を回避、 1.5-2x 追加期待) — 主犯
+- **KvCache pre-allocated buffer 化** (append の memcpy 不要に、 1.1-1.2x)
+- **per-head attention BLAS 化** (`(1, d_h) × (d_h, n)`、 1.1-1.2x)
+- **QKV projection 融合** (`(1, d) × (d, 3d)`、 副次効果)
+- **Prefill batch forward** (現状: prompt N-1 token を逐次 forward_step)
+- **KV cache truncation (sliding window)** で `max_len` 超過時の継続生成
 
 ## 生成制御の追加
 - ~~top-p (nucleus) sampling~~ → [Phase 5-1](phase5.md#phase-5-1-top-p-nucleus-sampling) で実装完了
