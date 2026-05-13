@@ -577,7 +577,11 @@ fn main() {
     //   期待 total: ~6-7 h (Phase 6-c の ~9 h 比 -25 〜 -30%)、
     //          BPC: Phase 6-c と同等以上 (WSD で同 step 内の収束効率が向上)。
     let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd();
-    training_and_inference(&cfg);
+    // training_and_inference(&cfg);
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd/best.bin",
+    );
 
     // Phase 6-c: WarmupCosine 旧バイナリで起動して step 180 まで進めたが、
     //   Phase 7 高速化が完了したので Phase 6-d に振り替え。

@@ -36,9 +36,9 @@ impl LayerNormalization {
         }
     }
 
-    /// Matrix 直叩き API。 行ごとに rayon で並列化。
+    /// 行ごとに rayon で並列化。
     /// cache_x_hat / cache_inv_std を更新し backward から再利用する。
-    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
         let (seq_len, d_model) = x.shape();
         let n = d_model as f32;
         let eps = self.eps;
@@ -73,8 +73,8 @@ impl LayerNormalization {
         Matrix::from_flat(y_data, seq_len, d_model)
     }
 
-    /// Matrix 直叩き backward。 grad_gamma / grad_beta は加算 (zero_grad 後に呼ぶ前提)。
-    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+    /// grad_gamma / grad_beta は加算 (zero_grad 後に呼ぶ前提)。
+    pub fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         let (seq_len, d_model) = dl_dy.shape();
         let d = d_model as f32;
         let gamma = &self.gamma;
@@ -142,18 +142,6 @@ impl LayerNormalization {
         Matrix::from_flat(dx_data, seq_len, d_model)
     }
 
-    /// 旧 API: jagged → Matrix 経由で forward_matrix を呼ぶ。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由で backward_matrix を呼ぶ。
-    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dy);
-        self.backward_matrix(&dy).to_jagged()
-    }
-
     pub fn zero_grad(&mut self) {
         self.grad_gamma.fill(0.0);
         self.grad_beta.fill(0.0);
@@ -170,20 +158,12 @@ impl LayerNormalization {
 }
 
 impl Normalization for LayerNormalization {
-    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn forward(&mut self, x: &Matrix) -> Matrix {
         self.forward(x)
     }
 
-    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         self.backward(dl_dy)
-    }
-
-    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
-        self.forward_matrix(x)
-    }
-
-    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
-        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

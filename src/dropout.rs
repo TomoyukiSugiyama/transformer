@@ -38,8 +38,8 @@ impl Dropout {
         self.training = training;
     }
 
-    /// Matrix 直叩き forward。 学習時はマスクを掛けて scale-up、 推論時は素通し (clone)。
-    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+    /// 学習時はマスクを掛けて scale-up、 推論時は素通し (clone)。
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
         if !self.training || self.p == 0.0 {
             self.mask.clear();
             self.mask_shape = (0, 0);
@@ -62,8 +62,7 @@ impl Dropout {
         Matrix::from_flat(out, x.rows(), x.cols())
     }
 
-    /// Matrix 直叩き backward。
-    pub fn backward_matrix(&self, dl_dy: &Matrix) -> Matrix {
+    pub fn backward(&self, dl_dy: &Matrix) -> Matrix {
         if self.mask.is_empty() {
             return dl_dy.clone();
         }
@@ -76,51 +75,46 @@ impl Dropout {
         Matrix::from_flat(out, dl_dy.rows(), dl_dy.cols())
     }
 
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dy);
-        self.backward_matrix(&dy).to_jagged()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn jagged(rows: &[Vec<f32>]) -> Matrix {
+        Matrix::from_jagged(rows)
+    }
+
     #[test]
     fn p_zero_is_identity_in_training() {
         let mut d = Dropout::new(0.0);
-        let x = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let x = jagged(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
         let y = d.forward(&x);
-        assert_eq!(y, x);
-        let g = vec![vec![0.5; 3]; 2];
-        assert_eq!(d.backward(&g), g);
+        assert_eq!(y.data(), x.data());
+        let g = jagged(&vec![vec![0.5; 3]; 2]);
+        let dg = d.backward(&g);
+        assert_eq!(dg.data(), g.data());
     }
 
     #[test]
     fn inference_mode_is_identity() {
         let mut d = Dropout::new(0.5);
         d.set_training(false);
-        let x = vec![vec![1.0; 100]];
+        let x = jagged(&[vec![1.0; 100]]);
         let y = d.forward(&x);
-        assert_eq!(y, x);
+        assert_eq!(y.data(), x.data());
         // mask が空なので backward も identity
-        let g = vec![vec![0.7; 100]];
-        assert_eq!(d.backward(&g), g);
+        let g = jagged(&[vec![0.7; 100]]);
+        let dg = d.backward(&g);
+        assert_eq!(dg.data(), g.data());
     }
 
     #[test]
     fn training_mode_drops_some_and_scales_others() {
         let mut d = Dropout::new(0.5);
-        let x = vec![vec![1.0; 10000]];
+        let x = jagged(&[vec![1.0; 10000]]);
         let y = d.forward(&x);
-        let row = &y[0];
+        let row = y.row(0);
         // 各要素は 0.0 か 2.0 (= 1/0.5) のどちらか
         for &v in row {
             assert!(v == 0.0 || (v - 2.0).abs() < 1e-6);
@@ -137,18 +131,18 @@ mod tests {
     #[test]
     fn backward_applies_same_mask() {
         let mut d = Dropout::new(0.3);
-        let x = vec![vec![10.0; 50]];
+        let x = jagged(&[vec![10.0; 50]]);
         let y = d.forward(&x);
-        let g = vec![vec![1.0; 50]];
+        let g = jagged(&[vec![1.0; 50]]);
         let dx = d.backward(&g);
         // forward で 0.0 になった位置は backward でも 0.0 (mask は同じ)
         for i in 0..50 {
-            if y[0][i] == 0.0 {
-                assert_eq!(dx[0][i], 0.0);
+            if y.row(0)[i] == 0.0 {
+                assert_eq!(dx.row(0)[i], 0.0);
             } else {
                 // 通った位置は scale = 1/(1-0.3) = 1.4286...
                 let scale = 1.0 / 0.7;
-                assert!((dx[0][i] - scale).abs() < 1e-5);
+                assert!((dx.row(0)[i] - scale).abs() < 1e-5);
             }
         }
     }

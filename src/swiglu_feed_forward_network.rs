@@ -67,8 +67,7 @@ impl SwiGluFeedForwardNetwork {
         s + x * s * (1.0 - s)
     }
 
-    /// Matrix 直叩き forward。
-    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
         let gate = x.matmul(&self.w_gate);
         let up = x.matmul(&self.w_up);
 
@@ -85,8 +84,7 @@ impl SwiGluFeedForwardNetwork {
         y
     }
 
-    /// Matrix 直叩き backward。
-    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+    pub fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         // W_down の grad
         let g_w_down = self.cache_a.transpose().matmul(dl_dy);
         self.grad_w_down.add_in_place(&g_w_down);
@@ -115,18 +113,6 @@ impl SwiGluFeedForwardNetwork {
         dl_dx
     }
 
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dy);
-        self.backward_matrix(&dy).to_jagged()
-    }
-
     pub fn zero_grad(&mut self) {
         self.grad_w_gate.data_mut().fill(0.0);
         self.grad_w_up.data_mut().fill(0.0);
@@ -149,20 +135,12 @@ impl SwiGluFeedForwardNetwork {
 }
 
 impl FeedForward for SwiGluFeedForwardNetwork {
-    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn forward(&mut self, x: &Matrix) -> Matrix {
         self.forward(x)
     }
 
-    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         self.backward(dl_dy)
-    }
-
-    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
-        self.forward_matrix(x)
-    }
-
-    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
-        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {
@@ -229,6 +207,10 @@ mod test {
         assert!((SwiGluFeedForwardNetwork::swish_grad(-1.0) - 0.0723).abs() < 1e-3);
     }
 
+    fn jagged(rows: &[Vec<f32>]) -> Matrix {
+        Matrix::from_jagged(rows)
+    }
+
     #[test]
     fn forward_with_fixed_weights() {
         // 最小構成: d_model=1, d_ff=2 → d_ff_g=1, seq=1
@@ -239,15 +221,14 @@ mod test {
         sw.w_up.data_mut().fill(1.0);
         sw.w_down.data_mut().fill(1.0);
 
-        // x = [[2.0]]
-        let x = vec![vec![2.0]];
+        let x = jagged(&[vec![2.0]]);
         let y = sw.forward(&x);
 
         // gate = x @ w_gate = [[2.0]]
         // up   = x @ w_up   = [[2.0]]
         // a    = swish(2.0) * 2.0 = 1.7616 * 2.0 = 3.5233
         // y    = a @ w_down = [[3.5233]]
-        assert!((y[0][0] - 3.5233).abs() < 1e-3);
+        assert!((y.row(0)[0] - 3.5233).abs() < 1e-3);
     }
 
     #[test]
@@ -282,36 +263,35 @@ mod test {
 
         // 入力もランダム (seed 固定)
         let mut rng = SmallRng::seed_from_u64(42);
-        let x: Vec<Vec<f32>> = (0..seq_len)
+        let x_jag: Vec<Vec<f32>> = (0..seq_len)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
 
         // ★ 解析的勾配を最初に 1 回だけ取得 ★
-        let _ = sw.forward(&x);
-        let dl_dy = vec![vec![1.0; d_model]; seq_len];
+        let _ = sw.forward(&jagged(&x_jag));
+        let dl_dy = jagged(&vec![vec![1.0; d_model]; seq_len]);
         let dl_dx_analytic = sw.backward(&dl_dy);
 
         // 数値微分: L = sum(y) と置く (∂L/∂y_ij = 1)
         let h = 1e-3;
         for i in 0..seq_len {
             for j in 0..d_model {
-                let mut x_p = x.clone();
+                let mut x_p = x_jag.clone();
                 x_p[i][j] += h;
-                let y_p = sw.forward(&x_p);
-                let l_p: f32 = y_p.iter().flatten().sum();
+                let y_p = sw.forward(&jagged(&x_p));
+                let l_p: f32 = y_p.data().iter().sum();
 
-                let mut x_m = x.clone();
+                let mut x_m = x_jag.clone();
                 x_m[i][j] -= h;
-                let y_m = sw.forward(&x_m);
-                let l_m: f32 = y_m.iter().flatten().sum();
+                let y_m = sw.forward(&jagged(&x_m));
+                let l_m: f32 = y_m.data().iter().sum();
 
                 let num = (l_p - l_m) / (2.0 * h);
 
+                let analytic = dl_dx_analytic.row(i)[j];
                 assert!(
-                    (dl_dx_analytic[i][j] - num).abs() < 1e-2,
-                    "mismatch at ({i},{j}): analytic={}, numerical={}",
-                    dl_dx_analytic[i][j],
-                    num
+                    (analytic - num).abs() < 1e-2,
+                    "mismatch at ({i},{j}): analytic={analytic}, numerical={num}",
                 );
             }
         }
@@ -333,11 +313,12 @@ mod test {
         let mut b = SwiGluFeedForwardNetwork::new(d_model, d_ff);
         b.from_weight_map(&map).unwrap();
 
-        let x = vec![vec![1.0, 2.0, 3.0, 4.0]; 2];
+        let x = jagged(&vec![vec![1.0, 2.0, 3.0, 4.0]; 2]);
         let y_a = a.forward(&x);
         let y_b = b.forward(&x);
 
         // 完全一致 (同じ重み × 同じ入力 × 同じ計算経路)
-        assert_eq!(y_a, y_b);
+        assert_eq!(y_a.data(), y_b.data());
+        assert_eq!(y_a.shape(), y_b.shape());
     }
 }

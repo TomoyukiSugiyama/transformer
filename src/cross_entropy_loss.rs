@@ -23,10 +23,9 @@ impl CrossEntropyLoss {
         (loss, grad)
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
     /// `logits` は (seq_len, vocab) の Matrix、 戻り値 grads も同形。
     /// rayon で行ごとに並列化、 grads の内部バッファは flat。
-    pub fn forward_sequence_matrix(
+    pub fn forward_sequence(
         logits: &Matrix,
         targets: &[usize],
         mask: &[u8],
@@ -59,16 +58,5 @@ impl CrossEntropyLoss {
             .sum();
         let avg_loss = total_loss * inv_count;
         (avg_loss, Matrix::from_flat(grad_data, seq_len, vocab))
-    }
-
-    /// 旧 API: jagged。
-    pub fn forward_sequence(
-        logits_seq: &[Vec<f32>],
-        targets: &[usize],
-        mask: &[u8],
-    ) -> (f32, Vec<Vec<f32>>) {
-        let m = Matrix::from_jagged(logits_seq);
-        let (l, g) = Self::forward_sequence_matrix(&m, targets, mask);
-        (l, g.to_jagged())
     }
 }

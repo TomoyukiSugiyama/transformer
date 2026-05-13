@@ -154,31 +154,20 @@ impl LanguageModel {
 
     /// Sinusoidal の場合は位置エンコーディングを加算、 RoPE の場合は埋め込みを素通し。
     /// (RoPE は MHA 内で Q, K に直接回転を掛けるためここで加算しない)
-    fn apply_positional_encoding_matrix(&self, emb: Matrix) -> Matrix {
+    fn apply_positional_encoding(&self, emb: Matrix) -> Matrix {
         match &self.pe {
-            Some(pe) => pe.forward_matrix(&emb),
+            Some(pe) => pe.forward(&emb),
             None => emb,
         }
     }
 
-    #[allow(dead_code)]
-    fn forward_ids(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
-        let seq = token_ids.len();
-        let mask = causal_mask(seq);
-        let emb = self.embedding.forward_matrix(token_ids);
-        let x = self.apply_positional_encoding_matrix(emb);
-        let h = self.transformer.forward_matrix(&x, Some(&mask));
-        self.output_head.forward_matrix(&h).to_jagged()
-    }
-
     /// 生成用: 最後のトークン位置の logits だけ計算する。
-    /// 全位置を計算する `forward_ids` よりも `O(seq)` 倍速い。
     fn forward_ids_last(&mut self, token_ids: &[usize]) -> Vec<f32> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
-        let emb = self.embedding.forward_matrix(token_ids);
-        let x = self.apply_positional_encoding_matrix(emb);
-        let h = self.transformer.forward_matrix(&x, Some(&mask));
+        let emb = self.embedding.forward(token_ids);
+        let x = self.apply_positional_encoding(emb);
+        let h = self.transformer.forward(&x, Some(&mask));
         self.output_head.logits_last(h.row(seq - 1))
     }
 
@@ -194,20 +183,20 @@ impl LanguageModel {
 
         self.set_training(false);
         let mask = causal_mask(seq);
-        let emb = self.embedding.forward_matrix(token_ids);
-        let x = self.apply_positional_encoding_matrix(emb);
-        let h = self.transformer.forward_matrix(&x, Some(&mask));
+        let emb = self.embedding.forward(token_ids);
+        let x = self.apply_positional_encoding(emb);
+        let h = self.transformer.forward(&x, Some(&mask));
 
         // shifted: 先頭から seq-1 行
         let h_shifted = slice_rows(&h, 0, seq - 1);
-        let logits = self.output_head.forward_matrix(&h_shifted);
+        let logits = self.output_head.forward(&h_shifted);
 
         let targets = &token_ids[1..];
         let mask_ce: Vec<u8> = targets
             .iter()
             .map(|&t| if t == pad_id { 0 } else { 1 })
             .collect();
-        let (loss, _) = CrossEntropyLoss::forward_sequence_matrix(&logits, targets, &mask_ce);
+        let (loss, _) = CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
         self.set_training(true);
         loss
     }
@@ -218,12 +207,12 @@ impl LanguageModel {
 
         let mask = causal_mask(seq);
 
-        let emb = self.embedding.forward_matrix(token_ids);
-        let x = self.apply_positional_encoding_matrix(emb);
-        let h = self.transformer.forward_matrix(&x, Some(&mask));
+        let emb = self.embedding.forward(token_ids);
+        let x = self.apply_positional_encoding(emb);
+        let h = self.transformer.forward(&x, Some(&mask));
 
         let h_shifted = slice_rows(&h, 0, seq - 1);
-        let logits = self.output_head.forward_matrix(&h_shifted);
+        let logits = self.output_head.forward(&h_shifted);
 
         let targets = &token_ids[1..];
 
@@ -233,12 +222,12 @@ impl LanguageModel {
             .collect();
 
         let (loss, dl_dlogits) =
-            CrossEntropyLoss::forward_sequence_matrix(&logits, targets, &mask_ce);
-        let dl_dh_shifted = self.output_head.backward_matrix(&dl_dlogits);
+            CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
+        let dl_dh_shifted = self.output_head.backward(&dl_dlogits);
         let dl_dh_full = pad_grad_matrix(&dl_dh_shifted, seq);
         let dl_dh_full = clip_grad_norm_matrix(dl_dh_full, 1.0);
-        let dl_dx = self.transformer.backward_matrix(&dl_dh_full);
-        self.embedding.backward_matrix(&dl_dx);
+        let dl_dx = self.transformer.backward(&dl_dh_full);
+        self.embedding.backward(&dl_dx);
 
         loss
     }

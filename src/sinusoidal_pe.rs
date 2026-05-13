@@ -32,9 +32,8 @@ impl SinusoidalPE {
             .collect()
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
     /// 入力 (seq_len, d_model) に対し各行に PE を加算した新しい Matrix を返す。
-    pub fn forward_matrix(&self, token_emb: &Matrix) -> Matrix {
+    pub fn forward(&self, token_emb: &Matrix) -> Matrix {
         let (seq_len, d_model) = token_emb.shape();
         assert!(seq_len <= self.table.len(), "seq_len exceeded max_len");
         let mut data = token_emb.data().to_vec();
@@ -48,9 +47,4 @@ impl SinusoidalPE {
         Matrix::from_flat(data, seq_len, d_model)
     }
 
-    /// 旧 API: jagged。
-    pub fn forward(&self, token_emb: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let m = Matrix::from_jagged(token_emb);
-        self.forward_matrix(&m).to_jagged()
-    }
 }

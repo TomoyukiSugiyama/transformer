@@ -81,6 +81,7 @@ Phase 6-c で per-step ~11,000 ms (3000 step ≒ 9.2 h) になり、 GPU 移植�
 | **B1 Matrix 直叩き化** | 全 9 レイヤに `forward_matrix(&Matrix) -> Matrix` を追加。 旧 `Vec<Vec<f32>>` API 経路の `from_jagged`/`to_jagged` 変換を完全排除 | ✅ 完了 |
 | **B2 QKV projection 融合** | W_Q/W_K/W_V → W_QKV (`d × 3d`)。 forward 1 matmul + backward 1 matmul。 checkpoint は旧形式互換 | ✅ 完了 |
 | **計測** | `cargo test --release bench_phase7_step_time -- --nocapture --ignored` で ~1.16-1.20x speedup を確認 (Phase 6-c 並列実行時の保守値、 単独条件では推定 1.3-1.4x) | ✅ 完了 |
+| **Phase 7-2 旧 API クリーンアップ** | `forward(&[Vec<f32>])` 系を全削除 (27 メソッド)、 `*_matrix` → bare 名にリネーム、 KV-cache 推論パス (`forward_step`) も Matrix 直叩き化 | ✅ 完了 |
 | **B3 Flash Attention 風 (CPU online softmax)** | `seq² × n_heads × n_layers` メモリ I/O を削減 | 📋 未着手 |
 | **alloc 削減 (split_columns / transpose 等)** | backward 中の数 GB 再アロケを pre-allocated buffer 化 | 📋 未着手 |
 

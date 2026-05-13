@@ -126,8 +126,7 @@ impl MultiHeadAttention {
         self.w_qkv = w;
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
-    pub fn forward_matrix(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+    pub fn forward(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
         // Q, K, V を **1 つの matmul に融合**: x @ W_QKV → split。
         // 旧 3 matmul (x @ W_Q, x @ W_K, x @ W_V) より BLAS 効率が良い。
         let qkv = x.matmul(&self.w_qkv);
@@ -171,8 +170,7 @@ impl MultiHeadAttention {
         output
     }
 
-    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
-    pub fn backward_matrix(&mut self, dl_dout: &Matrix) -> Matrix {
+    pub fn backward(&mut self, dl_dout: &Matrix) -> Matrix {
         // W_O backward
         // grad_w_o += concat^T @ dl_dout
         let g_w_o = self.cache_concat.transpose().matmul(dl_dout);
@@ -234,22 +232,6 @@ impl MultiHeadAttention {
 
         // dl_dx = dl_dqkv @ W_QKV^T  shape: (seq, d_model)
         dl_dqkv.matmul(&self.w_qkv.transpose())
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(
-        &mut self,
-        x: &[Vec<f32>],
-        mask: Option<&Vec<Vec<bool>>>,
-    ) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm, mask).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dout);
-        self.backward_matrix(&dy).to_jagged()
     }
 
     /// 推論専用 (KV cache あり) の 1 token 前進。

@@ -65,34 +65,20 @@ impl Transformer {
         }
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
-    pub fn forward_matrix(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+    pub fn forward(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
         let mut h = x.clone();
         for i in 0..self.blocks.len() {
-            h = self.blocks[i].forward_matrix(&h, mask);
+            h = self.blocks[i].forward(&h, mask);
         }
-        self.final_norm.forward_matrix(&h)
+        self.final_norm.forward(&h)
     }
 
-    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
-    pub fn backward_matrix(&mut self, dl_dout: &Matrix) -> Matrix {
-        let mut d1 = self.final_norm.backward_matrix(dl_dout);
+    pub fn backward(&mut self, dl_dout: &Matrix) -> Matrix {
+        let mut d1 = self.final_norm.backward(dl_dout);
         for i in (0..self.blocks.len()).rev() {
-            d1 = self.blocks[i].backward_matrix(&d1);
+            d1 = self.blocks[i].backward(&d1);
         }
         d1
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm, mask).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dout);
-        self.backward_matrix(&dy).to_jagged()
     }
 
     /// 推論専用: 各層の `KvCache` をプロンプト用に作成する。
@@ -117,10 +103,11 @@ impl Transformer {
         for (block, cache) in self.blocks.iter_mut().zip(caches.iter_mut()) {
             h = block.forward_step(&h, cache);
         }
-        // final_norm は (1, d_model) として扱う
-        let single = vec![h];
-        let normed = self.final_norm.forward(&single);
-        normed.into_iter().next().unwrap()
+        // final_norm を 1-row Matrix で呼ぶ
+        let d = h.len();
+        let h_m = Matrix::from_flat(h, 1, d);
+        let normed = self.final_norm.forward(&h_m);
+        normed.row(0).to_vec()
     }
 
     pub fn zero_grad(&mut self) {

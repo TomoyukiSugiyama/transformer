@@ -74,8 +74,7 @@ impl FeedForwardNetwork {
         0.5 * (1.0 + tanh_val) + 0.5 * x * sech2 * c * (1.0 + 3.0 * 0.044715 * x.powi(2))
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
-    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
         self.cache_x = x.clone();
 
         // Layer 1: z1 = x @ W1 + b1   shape: (seq_len, d_ff)
@@ -95,8 +94,7 @@ impl FeedForwardNetwork {
         z2
     }
 
-    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
-    pub fn backward_matrix(&mut self, dl_dz2: &Matrix) -> Matrix {
+    pub fn backward(&mut self, dl_dz2: &Matrix) -> Matrix {
         // --- W2 の勾配 ---
         // grad_w2 += cache_a^T @ dl_dz2   shape: (d_ff, d_model)
         let g_w2 = self.cache_a.transpose().matmul(dl_dz2);
@@ -133,18 +131,6 @@ impl FeedForwardNetwork {
         dl_dz1.matmul(&self.w1.transpose())
     }
 
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&mut self, dl_dz2: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dz2);
-        self.backward_matrix(&dy).to_jagged()
-    }
-
     pub fn zero_grad(&mut self) {
         self.grad_w1.data_mut().fill(0.0);
         self.grad_b1.fill(0.0);
@@ -161,20 +147,12 @@ impl FeedForwardNetwork {
 }
 
 impl FeedForward for FeedForwardNetwork {
-    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn forward(&mut self, x: &Matrix) -> Matrix {
         self.forward(x)
     }
 
-    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         self.backward(dl_dy)
-    }
-
-    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
-        self.forward_matrix(x)
-    }
-
-    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
-        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

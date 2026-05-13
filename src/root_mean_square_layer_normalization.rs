@@ -33,8 +33,8 @@ impl RootMeanSquareLayerNormalization {
         }
     }
 
-    /// Matrix 直叩き forward。 行ごとに rayon で並列化。
-    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+    /// 行ごとに rayon で並列化。
+    pub fn forward(&mut self, x: &Matrix) -> Matrix {
         let (seq_len, d_model) = x.shape();
         let n = d_model as f32;
         let eps = self.eps;
@@ -66,8 +66,8 @@ impl RootMeanSquareLayerNormalization {
         Matrix::from_flat(y_data, seq_len, d_model)
     }
 
-    /// Matrix 直叩き backward。 grad_gain は加算。
-    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+    /// grad_gain は加算。
+    pub fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         let (seq_len, d_model) = dl_dy.shape();
         let d = d_model as f32;
         let gain = &self.gain;
@@ -126,18 +126,6 @@ impl RootMeanSquareLayerNormalization {
         Matrix::from_flat(dx_data, seq_len, d_model)
     }
 
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let xm = Matrix::from_jagged(x);
-        self.forward_matrix(&xm).to_jagged()
-    }
-
-    /// 旧 API: jagged → Matrix 経由。
-    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dy = Matrix::from_jagged(dl_dy);
-        self.backward_matrix(&dy).to_jagged()
-    }
-
     pub fn zero_grad(&mut self) {
         self.grad_gain.fill(0.0);
     }
@@ -148,20 +136,12 @@ impl RootMeanSquareLayerNormalization {
 }
 
 impl Normalization for RootMeanSquareLayerNormalization {
-    fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn forward(&mut self, x: &Matrix) -> Matrix {
         self.forward(x)
     }
 
-    fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
         self.backward(dl_dy)
-    }
-
-    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
-        self.forward_matrix(x)
-    }
-
-    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
-        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {
@@ -196,10 +176,14 @@ impl Checkpointable for RootMeanSquareLayerNormalization {
 mod test {
     use super::*;
 
+    fn jagged(rows: &[Vec<f32>]) -> Matrix {
+        Matrix::from_jagged(rows)
+    }
+
     #[test]
     fn forward_normalizes_known_input_to_expected_values() {
-        let x: Vec<Vec<f32>> = vec![vec![3.0, 4.0]; 1];
-        let d_model = x[0].len();
+        let x = jagged(&[vec![3.0, 4.0]]);
+        let d_model = x.cols();
         let mut rms = RootMeanSquareLayerNormalization::new(d_model);
 
         // ms = (9 + 16)/2 = 12.5
@@ -207,14 +191,14 @@ mod test {
         // x_hat = [3/3.5355, 4/3.5355] ≈ [0.8485, 1.1314]
         // y = [0.8485, 1.1314] (gain=1.0 なので変化なし)
         let y = rms.forward(&x);
-        assert!((y[0][0] - 0.8485).abs() < 1e-3);
-        assert!((y[0][1] - 1.1314).abs() < 1e-3);
+        assert!((y.row(0)[0] - 0.8485).abs() < 1e-3);
+        assert!((y.row(0)[1] - 1.1314).abs() < 1e-3);
     }
 
     #[test]
     fn forward_handle_small_values() {
-        let x: Vec<Vec<f32>> = vec![vec![0.001, 0.002]; 1];
-        let d_model = x[0].len();
+        let x = jagged(&[vec![0.001, 0.002]]);
+        let d_model = x.cols();
         let mut rms = RootMeanSquareLayerNormalization::new(d_model);
 
         // ms = (0.001^2 + 0.002-2)/2 = 2.5e-6
@@ -222,14 +206,14 @@ mod test {
         // x_hat = [0.001/1.871e-3, 0.002/1.871e-3] ≈ [0.5345, 1.0690]
         // y = [0.5345, 1.0690] (gain=1.0 なので変化なし)
         let y = rms.forward(&x);
-        assert!((y[0][0] - 0.5345).abs() < 1e-3);
-        assert!((y[0][1] - 1.0690).abs() < 1e-3);
+        assert!((y.row(0)[0] - 0.5345).abs() < 1e-3);
+        assert!((y.row(0)[1] - 1.0690).abs() < 1e-3);
     }
 
     #[test]
     fn foward_handles_constant_input() {
-        let x: Vec<Vec<f32>> = vec![vec![2.0, 2.0]; 1];
-        let d_model = x[0].len();
+        let x = jagged(&[vec![2.0, 2.0]]);
+        let d_model = x.cols();
         let mut rms = RootMeanSquareLayerNormalization::new(d_model);
 
         // ms = (2^2 + 2^2)/2 = 4.0
@@ -237,14 +221,14 @@ mod test {
         // x_hat = [2/2, 2/2] ≈ [1.0000, 1.0000]
         // y = [1.0000, 1.0000] (gain=1.0 なので変化なし)
         let y = rms.forward(&x);
-        assert!((y[0][0] - 1.0000).abs() < 1e-3);
-        assert!((y[0][1] - 1.0000).abs() < 1e-3);
+        assert!((y.row(0)[0] - 1.0000).abs() < 1e-3);
+        assert!((y.row(0)[1] - 1.0000).abs() < 1e-3);
     }
 
     #[test]
     fn forward_applies_gain_per_dimention() {
-        let x: Vec<Vec<f32>> = vec![vec![3.0, 4.0]; 1];
-        let d_model = x[0].len();
+        let x = jagged(&[vec![3.0, 4.0]]);
+        let d_model = x.cols();
         let mut rms = RootMeanSquareLayerNormalization::new(d_model);
 
         let gain: Vec<f32> = vec![2.0, 0.5];
@@ -252,8 +236,8 @@ mod test {
 
         // y = [0.8485 * 2.0, 1.1314 * 0.5] (gain=[2.0, 0.5])
         let y = rms.forward(&x);
-        assert!((y[0][0] - 0.8485 * 2.0).abs() < 1e-3);
-        assert!((y[0][1] - 1.1314 * 0.5).abs() < 1e-3);
+        assert!((y.row(0)[0] - 0.8485 * 2.0).abs() < 1e-3);
+        assert!((y.row(0)[1] - 1.1314 * 0.5).abs() < 1e-3);
     }
 
     #[test]
@@ -264,38 +248,38 @@ mod test {
         let seq_len = 3;
         let mut rng = SmallRng::seed_from_u64(42);
 
-        let x: Vec<Vec<f32>> = (0..seq_len)
+        let x_jag: Vec<Vec<f32>> = (0..seq_len)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
 
         let mut rms = RootMeanSquareLayerNormalization::new(d_model);
 
+        let x = jagged(&x_jag);
         let _ = rms.forward(&x);
 
-        let dl_dy = vec![vec![1.0; d_model]; seq_len];
+        let dl_dy = jagged(&vec![vec![1.0; d_model]; seq_len]);
         let dl_dx_analytics = rms.backward(&dl_dy);
 
         // 数値微分で各 x_ij の勾配を計算: 中心差分 (f(x+h) - f(x-h)) / (2h)
         let h = 1e-3;
         for i in 0..seq_len {
             for j in 0..d_model {
-                let mut x_plus = x.clone();
+                let mut x_plus = x_jag.clone();
                 x_plus[i][j] += h;
-                let y_plus = rms.forward(&x_plus);
-                let l_plus: f32 = y_plus.iter().flatten().sum();
+                let y_plus = rms.forward(&jagged(&x_plus));
+                let l_plus: f32 = y_plus.data().iter().sum();
 
-                let mut x_minus = x.clone();
+                let mut x_minus = x_jag.clone();
                 x_minus[i][j] -= h;
-                let y_minus = rms.forward(&x_minus);
-                let l_minus: f32 = y_minus.iter().flatten().sum();
+                let y_minus = rms.forward(&jagged(&x_minus));
+                let l_minus: f32 = y_minus.data().iter().sum();
 
                 let dl_dx_numerical = (l_plus - l_minus) / (2.0 * h);
 
+                let analytic = dl_dx_analytics.row(i)[j];
                 assert!(
-                    (dl_dx_analytics[i][j] - dl_dx_numerical).abs() < 1e-2,
-                    "mismatch at ({i}, {j}: analytic={}, numerical={})",
-                    dl_dx_analytics[i][j],
-                    dl_dx_numerical
+                    (analytic - dl_dx_numerical).abs() < 1e-2,
+                    "mismatch at ({i}, {j}: analytic={analytic}, numerical={dl_dx_numerical})",
                 );
             }
         }
@@ -313,10 +297,11 @@ mod test {
         let mut b = RootMeanSquareLayerNormalization::new(d_model);
         b.from_weight_map(&map).unwrap();
 
-        let x: Vec<Vec<f32>> = vec![vec![3.0, 4.0]; 1];
+        let x = jagged(&[vec![3.0, 4.0]]);
         let y_a = a.forward(&x);
         let y_b = b.forward(&x);
 
-        assert_eq!(y_a, y_b)
+        assert_eq!(y_a.data(), y_b.data());
+        assert_eq!(y_a.shape(), y_b.shape());
     }
 }

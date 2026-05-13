@@ -50,9 +50,8 @@ impl Embedding {
         &self.weight[token_id]
     }
 
-    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
     /// 戻り値は (seq_len, d_model) の Matrix。
-    pub fn forward_matrix(&mut self, token_ids: &[usize]) -> Matrix {
+    pub fn forward(&mut self, token_ids: &[usize]) -> Matrix {
         self.cache_ids = token_ids.to_vec();
         let scale = (self.d_model as f32).sqrt();
         let n = token_ids.len();
@@ -68,11 +67,6 @@ impl Embedding {
         Matrix::from_flat(data, n, d)
     }
 
-    /// 旧 API: jagged。 内部で Matrix 版を呼ぶ。
-    pub fn forward(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
-        self.forward_matrix(token_ids).to_jagged()
-    }
-
     /// 推論専用: 単一 token id を 1 ベクトルに埋め込む (内部 cache は触らない)。
     /// KV cache 利用時の 1 token 前進で使用。
     pub fn forward_one(&self, token_id: usize) -> Vec<f32> {
@@ -80,8 +74,7 @@ impl Embedding {
         self.lookup(token_id).iter().map(|&v| v * scale).collect()
     }
 
-    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
-    pub fn backward_matrix(&mut self, dl_dx: &Matrix) {
+    pub fn backward(&mut self, dl_dx: &Matrix) {
         let scale = (self.d_model as f32).sqrt();
         let d = self.d_model;
         for (i, &id) in self.cache_ids.iter().enumerate() {
@@ -95,12 +88,6 @@ impl Embedding {
                 self.grad_weight[id][j] += dx_row[j] * scale;
             }
         }
-    }
-
-    /// 旧 API: jagged。
-    pub fn backward(&mut self, dl_dx: &[Vec<f32>]) {
-        let dy = Matrix::from_jagged(dl_dx);
-        self.backward_matrix(&dy);
     }
 
     pub fn zero_grad(&mut self) {

@@ -115,8 +115,7 @@ Apple GPU/CUDA 移植を避けつつ **CPU だけで 2-3x の改善** を狙う�
 | `SinusoidalPE` | 行ループ | flat 加算 |
 | `CrossEntropyLoss::forward_sequence_matrix` | jagged grad 出力 | flat grad 出力 |
 
-旧 API (`forward(&[Vec<f32>])`) は **下位互換のため残してある** が、 内部で Matrix 版に変換するだけ。
-すべての主要パス (forward_loss, forward_backward, generate 系) は Matrix 直叩きに更新済み。
+旧 API (`forward(&[Vec<f32>])`) は **Phase 7-2 で完全削除** (下記「Phase 7-2: 旧 API クリーンアップ」参照)。
 
 #### B2: QKV projection 融合
 
@@ -143,6 +142,71 @@ Phase 6-c と同じ形状 (d_model=512, n_heads=8, n_layers=6, max_len=1024) を
 > また bench は `vocab_size=64` (Char tokenizer) なので、 Phase 6-c の `vocab=8000` より OutputHead matmul が
 > 軽い。 同条件で測れば実際の speedup はもう少し大きい (推定 1.3-1.4x)。
 
+### Phase 7-2: 旧 API クリーンアップ + KV-cache 推論パス Matrix 化 (✅ 完了)
+
+Phase 7 第一弾は新旧 API を二重に持つ「移行期」状態。 各層に `forward(&[Vec<f32>])` (旧) と
+`forward_matrix(&Matrix)` (新) が並ぶことで dead-code 警告が **14 個** 常駐し、 新規メソッドの
+命名規約も曖昧になっていた。 Phase 7-2 で以下を整理:
+
+#### 1. KV-cache 推論パス (`forward_step`) を Matrix 直叩き化
+
+旧:
+```rust
+// transformer_block::forward_step (KV cache, 1 token)
+let single = vec![x_new.to_vec()];           // jagged 1-row
+let norm1 = self.norm1.forward(&single);     // 旧 jagged forward
+let attn_out = self.mha.forward_step(&norm1[0], cache);
+let attn_dropped = self.drop_attn.forward(&[attn_out]);
+// ... ベクトル演算で residual ...
+```
+新:
+```rust
+let x_m = Matrix::from_flat(x_new.to_vec(), 1, d);   // 1-row Matrix
+let norm1 = self.norm1.forward(&x_m);                 // Matrix forward
+let attn_out_vec = self.mha.forward_step(norm1.row(0), cache);
+let attn_out_m = Matrix::from_flat(attn_out_vec, 1, d);
+let attn_dropped = self.drop_attn.forward(&attn_out_m);
+let mut x2 = x_m; x2.add_in_place(&attn_dropped);     // Matrix の add
+// ... 以降も Matrix のまま ...
+```
+
+per-token 推論で発生していた jagged ↔ Matrix 変換 (3 ペア × n_layers) を排除。
+
+#### 2. 旧 API `forward(&[Vec<f32>])` / `backward(&[Vec<f32>])` を全削除
+
+| 削除対象 | 削除メソッド数 |
+|----------|---------------|
+| `Normalization` trait + LayerNorm + RMSNorm | 6 |
+| `FeedForward` trait + GELU + SwiGLU | 6 |
+| `Dropout` | 2 |
+| `Embedding` (forward / backward jagged) | 2 |
+| `SinusoidalPE` (forward jagged) | 1 |
+| `OutputHead` (forward / backward jagged) | 2 |
+| `MultiHeadAttention` (forward / backward jagged) | 2 |
+| `TransformerBlock` (forward / backward jagged) | 2 |
+| `Transformer` (forward / backward jagged) | 2 |
+| `LanguageModel::forward_ids` (dead code) | 1 |
+| `CrossEntropyLoss::forward_sequence` (jagged 版) | 1 |
+| **合計** | **27 メソッド削除 (LOC -300 程度)** |
+
+#### 3. `*_matrix` → bare 名にリネーム
+
+`forward_matrix` → `forward`、 `backward_matrix` → `backward`、
+`forward_sequence_matrix` → `forward_sequence`。 移行期サフィックスがなくなり API がシンプルに。
+
+#### 4. テスト書き換え
+
+数値勾配チェック (rms / swiglu) と挙動テスト (dropout) を Matrix API 経由に書き換え。
+入力ジャグドは `Matrix::from_jagged(&x)` でラップ、 出力比較は `y.row(i)[j]` で参照。
+
+#### 効果
+
+- **dead-code 警告 14 → 0** (本物の警告が埋もれない)
+- **LOC -300〜-500 行** (重複 API 削除)
+- **KV-cache 推論側も Matrix 直叩き化** = per-token 1 行ぶんの jagged ↔ Matrix 変換が消える
+  (推論速度改善効果は数 % 程度を予想、 実測は Phase 6-d 完走後)
+- **API 一本化** = 新メソッド追加時に「`_matrix` 付ける?」の判断不要
+
 ### 今後 (検討中)
 
 - **B3 Flash Attention 風 (CPU online softmax + matmul 融合)**:
@@ -152,4 +216,6 @@ Phase 6-c と同じ形状 (d_model=512, n_heads=8, n_layers=6, max_len=1024) を
   数 GB を再アロケしている可能性あり。 pre-allocated buffer 化で 1.1-1.3x。
 - **bf16 mixed precision (Apple BNNS)**: 期待 1.8-2.5x、 実装難度大。 数値安定性試験要。
 - **KvCache の事前確保**: 推論時のみ。 alloc/realloc を削除。
+- **Embedding / SinusoidalPE / Rope の table を Matrix 化**: 残った `Vec<Vec<f32>>` の内部表現。
+  Matrix にすれば row lookup が `&[f32]` slice で済む (現状 `Vec<f32>` の clone が必要なケースあり)。
 
