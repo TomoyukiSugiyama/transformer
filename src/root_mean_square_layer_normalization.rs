@@ -2,6 +2,9 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 
+use rayon::prelude::*;
+
+use crate::matrix::Matrix;
 use crate::normalization::Normalization;
 use crate::{
     adam_w::AdamW,
@@ -15,8 +18,8 @@ pub struct RootMeanSquareLayerNormalization {
 
     grad_gain: Vec<f32>, // [d_model]
 
-    cache_x_hat: Vec<Vec<f32>>, // [seq_len, d_model] — x / (rms + eps)
-    cache_inv_rms: Vec<f32>,    // [seq_len] — 1.0 / (rms + eps)
+    cache_x_hat: Matrix,     // (seq_len, d_model) — x * inv_rms
+    cache_inv_rms: Vec<f32>, // (seq_len,)
 }
 
 impl RootMeanSquareLayerNormalization {
@@ -25,72 +28,114 @@ impl RootMeanSquareLayerNormalization {
             gain: vec![1.0; d_model],
             eps: 1e-6,
             grad_gain: vec![0.0; d_model],
-            cache_x_hat: Vec::new(),
+            cache_x_hat: Matrix::zeros(0, 0),
             cache_inv_rms: Vec::new(),
         }
     }
 
-    fn normalization(&mut self, x: &[f32]) -> Vec<f32> {
-        let d = x.len() as f32;
+    /// Matrix 直叩き forward。 行ごとに rayon で並列化。
+    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        let (seq_len, d_model) = x.shape();
+        let n = d_model as f32;
+        let eps = self.eps;
+        let gain = &self.gain;
 
-        let ms = x.iter().map(|v| v.powi(2)).sum::<f32>() / d;
+        let mut y_data = vec![0.0f32; seq_len * d_model];
+        let mut xh_data = vec![0.0f32; seq_len * d_model];
+        let mut inv_rms = vec![0.0f32; seq_len];
 
-        let inv_rms = 1.0 / (ms + self.eps).sqrt();
-
-        let x_hat: Vec<f32> = x.iter().map(|v| v * inv_rms).collect();
-
-        let y: Vec<f32> = x_hat
-            .iter()
+        y_data
+            .par_chunks_mut(d_model)
+            .zip(xh_data.par_chunks_mut(d_model))
+            .zip(inv_rms.par_iter_mut())
             .enumerate()
-            .map(|(i, xh)| self.gain[i] * xh)
-            .collect();
+            .for_each(|(i, ((y_row, xh_row), inv_r_slot))| {
+                let xi = x.row(i);
+                let ms = xi.iter().map(|v| v.powi(2)).sum::<f32>() / n;
+                let inv_r = 1.0 / (ms + eps).sqrt();
+                *inv_r_slot = inv_r;
+                for j in 0..d_model {
+                    let xh = xi[j] * inv_r;
+                    xh_row[j] = xh;
+                    y_row[j] = gain[j] * xh;
+                }
+            });
 
-        self.cache_x_hat.push(x_hat);
-        self.cache_inv_rms.push(inv_rms);
-
-        y
+        self.cache_x_hat = Matrix::from_flat(xh_data, seq_len, d_model);
+        self.cache_inv_rms = inv_rms;
+        Matrix::from_flat(y_data, seq_len, d_model)
     }
 
+    /// Matrix 直叩き backward。 grad_gain は加算。
+    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        let (seq_len, d_model) = dl_dy.shape();
+        let d = d_model as f32;
+        let gain = &self.gain;
+        let xh = &self.cache_x_hat;
+
+        // grad_gain の集計を rayon の fold で並列化
+        let sum_gain = (0..seq_len)
+            .into_par_iter()
+            .fold(
+                || vec![0.0f32; d_model],
+                |mut acc, i| {
+                    let dy_row = dl_dy.row(i);
+                    let xh_row = xh.row(i);
+                    for j in 0..d_model {
+                        acc[j] += dy_row[j] * xh_row[j];
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0.0f32; d_model],
+                |mut a, b| {
+                    for j in 0..d_model {
+                        a[j] += b[j];
+                    }
+                    a
+                },
+            );
+        for j in 0..d_model {
+            self.grad_gain[j] += sum_gain[j];
+        }
+
+        // dl/dx を行ごとに計算
+        let inv_rms = &self.cache_inv_rms;
+        let mut dx_data = vec![0.0f32; seq_len * d_model];
+        dx_data
+            .par_chunks_mut(d_model)
+            .enumerate()
+            .for_each(|(i, dx_row)| {
+                let dy_row = dl_dy.row(i);
+                let xh_row = xh.row(i);
+                let ir = inv_rms[i];
+
+                let mut sum_g_xh = 0.0f32;
+                let mut g = vec![0.0f32; d_model];
+                for j in 0..d_model {
+                    let gv = gain[j] * dy_row[j];
+                    g[j] = gv;
+                    sum_g_xh += gv * xh_row[j];
+                }
+                let coef = ir / d;
+                for j in 0..d_model {
+                    dx_row[j] = coef * (d * g[j] - xh_row[j] * sum_g_xh);
+                }
+            });
+        Matrix::from_flat(dx_data, seq_len, d_model)
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
     pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_x_hat.clear();
-        self.cache_inv_rms.clear();
-
-        x.iter().map(|row| self.normalization(row)).collect()
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm).to_jagged()
     }
 
-    /// dl_dy: [seq_len, d_model]
+    /// 旧 API: jagged → Matrix 経由。
     pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let d = self.gain.len() as f32;
-
-        for (dy_row, xh_row) in dl_dy.iter().zip(self.cache_x_hat.iter()) {
-            for j in 0..self.gain.len() {
-                self.grad_gain[j] += dy_row[j] * xh_row[j];
-            }
-        }
-
-        let mut dl_dx = Vec::with_capacity(dl_dy.len());
-        for (i, dy_row) in dl_dy.iter().enumerate() {
-            let inv_rms = self.cache_inv_rms[i];
-            let xh_row = &self.cache_x_hat[i];
-
-            // g_j = γ_j * dy_j
-            let g: Vec<f32> = dy_row
-                .iter()
-                .zip(self.gain.iter())
-                .map(|(dy, gam)| dy * gam)
-                .collect();
-
-            let sum_g_xh: f32 = g.iter().zip(xh_row).map(|(gj, xhj)| gj * xhj).sum();
-
-            let dx_row: Vec<f32> = g
-                .iter()
-                .zip(xh_row.iter())
-                .map(|(gi, xhi)| inv_rms / d * (d * gi - xhi * sum_g_xh))
-                .collect();
-            dl_dx.push(dx_row);
-        }
-
-        dl_dx
+        let dy = Matrix::from_jagged(dl_dy);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {
@@ -109,6 +154,14 @@ impl Normalization for RootMeanSquareLayerNormalization {
 
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
         self.backward(dl_dy)
+    }
+
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        self.forward_matrix(x)
+    }
+
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

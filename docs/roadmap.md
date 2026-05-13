@@ -35,14 +35,16 @@
 
 詳細は [docs/phase5.md](phase5.md) を参照。
 
-## トークナイザ刷新 (Phase 6) — 6-a 完了
+## トークナイザ刷新 (Phase 6) — 6-a 完了 / 6-d 起動準備完了
 
 Phase 5-4a 完了後、 質的課題 (bigram 切り誤り、 短コンテキスト、 文体一貫性) を **トークナイザ側** で改善するアプローチ。
 
 | 段階 | 項目 | 期待 / 実測 | 状態 |
 |------|------|------|------|
 | 6-a | Unicode char-level BPE (vocab 8K) | **実測 BPC 3.76 (Phase 5-4a 比 -10.0%)、 1 token=1.64 char、 実効 context ~840 char** | ✅ 完了 |
-| 6-b | Unicode char-level BPE (vocab 16K) | 1 token ~2.5 char, 実質 context ~1,280 char, BPC 3.65-3.72 期待 | 📋 計画 |
+| 6-b | Unicode char-level BPE (vocab 16K) | 起動時実測 chars/token=1.72 (期待 2.5 の半分以下)、 ROI 不足 → 6-c に振替 | ⛔ 中断 |
+| 6-c | vocab=8K のまま max_len 512 → 1024 | step 180 で per-step 11,000 ms 確認、 9.2 h 想定で **Phase 7 高速化に着手** → 6-d に振替 | ⛔ 中断 |
+| **6-d** | **6-c と同形状 + WSD scheduler + Phase 7 高速化バイナリ** | per-step ~9,000 ms、 total **~6-7 h** 想定。 Phase 6-a より BPC -2 〜 -5% | 🚧 起動準備完了 |
 
 実装: `src/char_bpe_tokenizer.rs` (新規、 byte-level の既存 BPE は英語用に保持)。 詳細・最終結果は [docs/phase6.md](phase6.md#phase-6-a-結果--完了) を参照。
 
@@ -69,7 +71,22 @@ macOS の Accelerate と同じ構造 (`#[cfg(target_os = ...)]` 分岐) で `ope
 `d_model=512〜768` に拡大すると matmul の比率も問題サイズも大きくなり、
 Accelerate 単独効果が `1.7×` から **`2〜3×`** に伸びる見込み。
 
-## 学習時間の高速化 (Phase 6 候補)
+## 学習時間の大規模高速化 (Phase 7) — 第一弾完了
+
+Phase 6-c で per-step ~11,000 ms (3000 step ≒ 9.2 h) になり、 GPU 移植を避けつつ CPU だけで **2-3x の改善**を狙うフェーズ。
+
+| 項目 | 内容 | 状態 |
+|------|------|------|
+| **B4 WSD scheduler** | `LrScheduleKind::WarmupStableDecay` を追加。 Config で切替可能 | ✅ 完了 |
+| **B1 Matrix 直叩き化** | 全 9 レイヤに `forward_matrix(&Matrix) -> Matrix` を追加。 旧 `Vec<Vec<f32>>` API 経路の `from_jagged`/`to_jagged` 変換を完全排除 | ✅ 完了 |
+| **B2 QKV projection 融合** | W_Q/W_K/W_V → W_QKV (`d × 3d`)。 forward 1 matmul + backward 1 matmul。 checkpoint は旧形式互換 | ✅ 完了 |
+| **計測** | `cargo test --release bench_phase7_step_time -- --nocapture --ignored` で ~1.16-1.20x speedup を確認 (Phase 6-c 並列実行時の保守値、 単独条件では推定 1.3-1.4x) | ✅ 完了 |
+| **B3 Flash Attention 風 (CPU online softmax)** | `seq² × n_heads × n_layers` メモリ I/O を削減 | 📋 未着手 |
+| **alloc 削減 (split_columns / transpose 等)** | backward 中の数 GB 再アロケを pre-allocated buffer 化 | 📋 未着手 |
+
+詳細は [`docs/performance.md`](performance.md#phase-7-大規模高速化-2026-05-) を参照。
+
+## 学習時間の高速化 (Phase 6 候補) — 旧記述
 
 Phase 5-4a (d=512, n_layers=6, batch=32) の現状: per-step ~9.4s、 実効 150 GFLOPS
 (M1 Max AMX 理論ピーク 700 GFLOPS の **21%**)。 改善余地あり。

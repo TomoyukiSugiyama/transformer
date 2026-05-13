@@ -1,3 +1,5 @@
+use crate::matrix::Matrix;
+
 pub struct SinusoidalPE {
     table: Vec<Vec<f32>>,
 }
@@ -30,18 +32,25 @@ impl SinusoidalPE {
             .collect()
     }
 
-    pub fn forward(&self, token_enb: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let seq_len = token_enb.len();
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    /// 入力 (seq_len, d_model) に対し各行に PE を加算した新しい Matrix を返す。
+    pub fn forward_matrix(&self, token_emb: &Matrix) -> Matrix {
+        let (seq_len, d_model) = token_emb.shape();
         assert!(seq_len <= self.table.len(), "seq_len exceeded max_len");
-        token_enb
-            .iter()
-            .enumerate()
-            .map(|(pos, enb)| {
-                enb.iter()
-                    .zip(self.table[pos].iter())
-                    .map(|(e, pe)| e + pe)
-                    .collect()
-            })
-            .collect()
+        let mut data = token_emb.data().to_vec();
+        for pos in 0..seq_len {
+            let dst = &mut data[pos * d_model..(pos + 1) * d_model];
+            let pe = &self.table[pos];
+            for j in 0..d_model {
+                dst[j] += pe[j];
+            }
+        }
+        Matrix::from_flat(data, seq_len, d_model)
+    }
+
+    /// 旧 API: jagged。
+    pub fn forward(&self, token_emb: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let m = Matrix::from_jagged(token_emb);
+        self.forward_matrix(&m).to_jagged()
     }
 }

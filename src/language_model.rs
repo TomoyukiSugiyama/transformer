@@ -7,6 +7,7 @@ use crate::{
     embedding::Embedding,
     feed_forward::FeedForwardKind,
     kv_cache::KvCache,
+    matrix::Matrix,
     multi_head_attention::causal_mask,
     normalization::NormalizationKind,
     output_head::OutputHead,
@@ -153,9 +154,9 @@ impl LanguageModel {
 
     /// Sinusoidal の場合は位置エンコーディングを加算、 RoPE の場合は埋め込みを素通し。
     /// (RoPE は MHA 内で Q, K に直接回転を掛けるためここで加算しない)
-    fn apply_positional_encoding(&self, emb: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    fn apply_positional_encoding_matrix(&self, emb: Matrix) -> Matrix {
         match &self.pe {
-            Some(pe) => pe.forward(&emb),
+            Some(pe) => pe.forward_matrix(&emb),
             None => emb,
         }
     }
@@ -164,10 +165,10 @@ impl LanguageModel {
     fn forward_ids(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
-        let emb = self.embedding.forward(token_ids);
-        let x = self.apply_positional_encoding(emb);
-        let h = self.transformer.forward(&x, Some(&mask));
-        self.output_head.forward(&h)
+        let emb = self.embedding.forward_matrix(token_ids);
+        let x = self.apply_positional_encoding_matrix(emb);
+        let h = self.transformer.forward_matrix(&x, Some(&mask));
+        self.output_head.forward_matrix(&h).to_jagged()
     }
 
     /// 生成用: 最後のトークン位置の logits だけ計算する。
@@ -175,10 +176,10 @@ impl LanguageModel {
     fn forward_ids_last(&mut self, token_ids: &[usize]) -> Vec<f32> {
         let seq = token_ids.len();
         let mask = causal_mask(seq);
-        let emb = self.embedding.forward(token_ids);
-        let x = self.apply_positional_encoding(emb);
-        let h = self.transformer.forward(&x, Some(&mask));
-        self.output_head.logits_last(&h[seq - 1])
+        let emb = self.embedding.forward_matrix(token_ids);
+        let x = self.apply_positional_encoding_matrix(emb);
+        let h = self.transformer.forward_matrix(&x, Some(&mask));
+        self.output_head.logits_last(h.row(seq - 1))
     }
 
     /// Forward のみで cross-entropy loss を計算する (backward は実行しない)。
@@ -193,19 +194,20 @@ impl LanguageModel {
 
         self.set_training(false);
         let mask = causal_mask(seq);
-        let emb = self.embedding.forward(token_ids);
-        let x = self.apply_positional_encoding(emb);
-        let h = self.transformer.forward(&x, Some(&mask));
+        let emb = self.embedding.forward_matrix(token_ids);
+        let x = self.apply_positional_encoding_matrix(emb);
+        let h = self.transformer.forward_matrix(&x, Some(&mask));
 
-        let h_shifted = &h[..seq - 1];
-        let logits = self.output_head.forward(&h_shifted);
+        // shifted: 先頭から seq-1 行
+        let h_shifted = slice_rows(&h, 0, seq - 1);
+        let logits = self.output_head.forward_matrix(&h_shifted);
 
         let targets = &token_ids[1..];
         let mask_ce: Vec<u8> = targets
             .iter()
             .map(|&t| if t == pad_id { 0 } else { 1 })
             .collect();
-        let (loss, _) = CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
+        let (loss, _) = CrossEntropyLoss::forward_sequence_matrix(&logits, targets, &mask_ce);
         self.set_training(true);
         loss
     }
@@ -216,12 +218,12 @@ impl LanguageModel {
 
         let mask = causal_mask(seq);
 
-        let emb = self.embedding.forward(token_ids);
-        let x = self.apply_positional_encoding(emb);
-        let h = self.transformer.forward(&x, Some(&mask));
+        let emb = self.embedding.forward_matrix(token_ids);
+        let x = self.apply_positional_encoding_matrix(emb);
+        let h = self.transformer.forward_matrix(&x, Some(&mask));
 
-        let h_shifted = &h[..seq - 1];
-        let logits = self.output_head.forward(&h_shifted);
+        let h_shifted = slice_rows(&h, 0, seq - 1);
+        let logits = self.output_head.forward_matrix(&h_shifted);
 
         let targets = &token_ids[1..];
 
@@ -230,12 +232,13 @@ impl LanguageModel {
             .map(|&t| if t == pad_id { 0 } else { 1 })
             .collect();
 
-        let (loss, dl_dlogits) = CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
-        let dl_dh_shifted = self.output_head.backward(&dl_dlogits);
-        let dl_dh_full = pad_grad(dl_dh_shifted, seq);
-        let dl_dh_full = clip_grad_norm(dl_dh_full, 1.0);
-        let dl_dx = self.transformer.backward(&dl_dh_full);
-        self.embedding.backward(&dl_dx);
+        let (loss, dl_dlogits) =
+            CrossEntropyLoss::forward_sequence_matrix(&logits, targets, &mask_ce);
+        let dl_dh_shifted = self.output_head.backward_matrix(&dl_dlogits);
+        let dl_dh_full = pad_grad_matrix(&dl_dh_shifted, seq);
+        let dl_dh_full = clip_grad_norm_matrix(dl_dh_full, 1.0);
+        let dl_dx = self.transformer.backward_matrix(&dl_dh_full);
+        self.embedding.backward_matrix(&dl_dx);
 
         loss
     }
@@ -609,24 +612,38 @@ fn apply_repetition_penalty(logits: &mut [f32], previous_ids: &[usize], penalty:
     }
 }
 
-fn pad_grad(mut dl: Vec<Vec<f32>>, seq: usize) -> Vec<Vec<f32>> {
-    let d_model = dl[0].len();
-    while dl.len() < seq {
-        dl.push(vec![0.0; d_model]);
+/// Matrix の指定行範囲をコピーした新 Matrix を返す。
+fn slice_rows(m: &Matrix, start: usize, end: usize) -> Matrix {
+    assert!(end <= m.rows() && start <= end);
+    let cols = m.cols();
+    let n = end - start;
+    let mut data = Vec::with_capacity(n * cols);
+    for i in start..end {
+        data.extend_from_slice(m.row(i));
     }
-    dl
+    Matrix::from_flat(data, n, cols)
 }
 
-fn clip_grad_norm(mut grads: Vec<Vec<f32>>, max_norm: f32) -> Vec<Vec<f32>> {
-    let norm: f32 = grads
-        .iter()
-        .flatten()
-        .map(|v| v.powi(2))
-        .sum::<f32>()
-        .sqrt();
+/// `dl` (rows = seq-1) を末尾 0 行で padding して `seq` 行の Matrix にする。
+fn pad_grad_matrix(dl: &Matrix, seq: usize) -> Matrix {
+    let d_model = dl.cols();
+    if dl.rows() == seq {
+        return dl.clone();
+    }
+    let mut data = vec![0.0f32; seq * d_model];
+    let n = dl.rows().min(seq);
+    data[..n * d_model].copy_from_slice(&dl.data()[..n * d_model]);
+    Matrix::from_flat(data, seq, d_model)
+}
+
+/// Matrix 全体ノルムでクリッピング。
+fn clip_grad_norm_matrix(mut grads: Matrix, max_norm: f32) -> Matrix {
+    let norm: f32 = grads.data().iter().map(|v| v.powi(2)).sum::<f32>().sqrt();
     if norm > max_norm {
         let scale = max_norm / norm;
-        grads.iter_mut().flatten().for_each(|v| *v *= scale);
+        for v in grads.data_mut() {
+            *v *= scale;
+        }
     }
     grads
 }
@@ -749,5 +766,106 @@ mod kv_cache_tests {
                 );
             }
         }
+    }
+}
+
+/// Phase 7 高速化の効果を見るベンチマーク。 Phase 6-c と同じモデル形状
+/// (d_model=512, n_heads=8, n_layers=6, d_ff=2048, max_len=1024) で
+/// `forward_backward + apply_gradients` を数 step 実行し、 1 step あたりの
+/// 平均所要時間を出力する。 比較対象は Phase 6-c の実測値 (~11,000 ms/step @ batch=16)。
+///
+/// `--nocapture` が無いと println! は出ないので、 走らせるときは:
+///   cargo test --release bench_phase7_step_time -- --nocapture --ignored
+#[cfg(test)]
+mod bench_tests {
+    use crate::adam_w::AdamW;
+    use crate::feed_forward::FeedForwardKind;
+    use crate::language_model::LanguageModel;
+    use crate::normalization::NormalizationKind;
+    use crate::positional_encoding::PositionalEncodingKind;
+    use crate::tokenizer::TokenizerKind;
+    use std::time::Instant;
+
+    /// Phase 6-c 相当 (d_model=512, n_layers=6, max_len=1024) の 1 step あたり時間を計測。
+    /// 重い (1 step で数秒〜十数秒) ので #[ignore] にしてある。
+    #[test]
+    #[ignore]
+    fn bench_phase7_step_time() {
+        // Phase 6-c と完全に同じ形状を作る (重みはランダム初期化だが計算量は同じ)。
+        // tokenizer は Char で代用 (vocab=64 程度。 OutputHead/Embedding が小さくなるので
+        // 実際の Phase 6-c (vocab=8000) より out-head の matmul が軽くなる点だけ留意)。
+        let corpus = "abcdefghijklmnopqrstuvwxyz0123456789 .,!?\nABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut model = LanguageModel::new(
+            corpus,
+            TokenizerKind::Char,
+            NormalizationKind::Rms,
+            FeedForwardKind::SwiGlu,
+            PositionalEncodingKind::Rope,
+            0,    // vocab_size 自動
+            512,  // d_model
+            8,    // n_heads
+            2048, // d_ff
+            6,    // n_layers
+            1024, // max_len
+            0.2,  // dropout
+        );
+        model.set_training(true);
+
+        let pad_id = model.pad_id();
+        let mut opt = AdamW::new_with_wd(7e-4, 0.1);
+
+        // batch=2 にして 1 step ≒ 1.5-2 sec を狙う (Phase 6-c は batch=16 で ~11 sec)。
+        // forward_backward / apply_gradients は 1 サンプルずつ呼ぶ実装が前提。
+        let batch_size = 2;
+        let seq_len = 1024;
+        let warmup_steps = 1;
+        let measure_steps = 3;
+
+        // 適当な token id 列 (vocab を超えないようランダム)
+        let vocab_size = 64; // Char tokenizer の概算 (実際の vocab はそれ未満)
+        let make_batch = |seed: usize| -> Vec<Vec<usize>> {
+            (0..batch_size)
+                .map(|b| {
+                    (0..seq_len)
+                        .map(|i| (seed + b * 31 + i * 7) % vocab_size.min(20))
+                        .collect()
+                })
+                .collect()
+        };
+
+        // warmup
+        for s in 0..warmup_steps {
+            let batch = make_batch(s + 100);
+            for sample in &batch {
+                let _ = model.forward_backward(sample, pad_id);
+            }
+            model.apply_gradients(&mut opt);
+            model.zero_grad();
+        }
+
+        // 計測
+        let start = Instant::now();
+        for s in 0..measure_steps {
+            let batch = make_batch(s);
+            for sample in &batch {
+                let _ = model.forward_backward(sample, pad_id);
+            }
+            model.apply_gradients(&mut opt);
+            model.zero_grad();
+        }
+        let elapsed = start.elapsed();
+        let per_step_ms = elapsed.as_secs_f64() * 1000.0 / measure_steps as f64;
+
+        println!("=== Phase 7 step time benchmark ===");
+        println!("  shape: d_model=512, n_heads=8, n_layers=6, d_ff=2048, max_len=1024");
+        println!("  batch_size={batch_size}, measure_steps={measure_steps}");
+        println!("  per-step (Matrix-direct path): {per_step_ms:.1} ms");
+        // Phase 6-c 実測 ~11000 ms/step @ batch=16
+        // batch=2 換算で旧コード期待値 = 11000 * 2/16 = 1375 ms/step
+        let phase6c_per_step_batch16_ms = 11000.0;
+        let baseline_per_step_ms = phase6c_per_step_batch16_ms * (batch_size as f64) / 16.0;
+        let speedup = baseline_per_step_ms / per_step_ms;
+        println!("  Phase 6-c (old) per-step @ batch={batch_size}: ~{baseline_per_step_ms:.0} ms (推定)");
+        println!("  speedup vs Phase 6-c (推定): {speedup:.2}x");
     }
 }

@@ -4,6 +4,7 @@ use std::io::Result;
 
 use crate::feed_forward::FeedForwardKind;
 use crate::kv_cache::KvCache;
+use crate::matrix::Matrix;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -64,21 +65,34 @@ impl Transformer {
         }
     }
 
-    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
-        let mut x = x.to_vec();
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    pub fn forward_matrix(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+        let mut h = x.clone();
         for i in 0..self.blocks.len() {
-            x = self.blocks[i].forward(&x, mask);
+            h = self.blocks[i].forward_matrix(&h, mask);
         }
-        self.final_norm.forward(&x)
+        self.final_norm.forward_matrix(&h)
     }
 
-    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let mut d1 = self.final_norm.backward(dl_dout);
-
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
+    pub fn backward_matrix(&mut self, dl_dout: &Matrix) -> Matrix {
+        let mut d1 = self.final_norm.backward_matrix(dl_dout);
         for i in (0..self.blocks.len()).rev() {
-            d1 = self.blocks[i].backward(&d1);
+            d1 = self.blocks[i].backward_matrix(&d1);
         }
         d1
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm, mask).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dout);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     /// 推論専用: 各層の `KvCache` をプロンプト用に作成する。

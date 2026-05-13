@@ -8,12 +8,16 @@
 
 use rand::{RngExt, rng};
 
+use crate::matrix::Matrix;
+
 pub struct Dropout {
     p: f32,
     training: bool,
     /// 直近の forward で適用した mask (training 時のみ作成)。
+    /// flat 表現で持ち、 `mask_shape` (rows, cols) で形を覚える。
     /// 各要素は 0.0 (drop) もしくは `1/(1-p)` (keep)。
-    mask: Vec<Vec<f32>>,
+    mask: Vec<f32>,
+    mask_shape: (usize, usize),
 }
 
 impl Dropout {
@@ -26,6 +30,7 @@ impl Dropout {
             p,
             training: true,
             mask: Vec::new(),
+            mask_shape: (0, 0),
         }
     }
 
@@ -33,48 +38,54 @@ impl Dropout {
         self.training = training;
     }
 
-    /// 学習時はマスクを掛けて scale-up、 推論時は素通し。
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    /// Matrix 直叩き forward。 学習時はマスクを掛けて scale-up、 推論時は素通し (clone)。
+    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
         if !self.training || self.p == 0.0 {
             self.mask.clear();
-            return x.to_vec();
+            self.mask_shape = (0, 0);
+            return x.clone();
         }
         let keep = 1.0 - self.p;
         let scale = 1.0 / keep;
+        let n = x.data().len();
         let mut rng = rng();
-        let mut mask: Vec<Vec<f32>> = Vec::with_capacity(x.len());
-        let mut out: Vec<Vec<f32>> = Vec::with_capacity(x.len());
-        for row in x {
-            let mut mask_row = Vec::with_capacity(row.len());
-            let mut out_row = Vec::with_capacity(row.len());
-            for &v in row {
-                let r: f32 = rng.random_range(0.0..1.0);
-                let m = if r < keep { scale } else { 0.0 };
-                mask_row.push(m);
-                out_row.push(v * m);
-            }
-            mask.push(mask_row);
-            out.push(out_row);
+        let mut mask = vec![0.0f32; n];
+        let mut out = vec![0.0f32; n];
+        for i in 0..n {
+            let r: f32 = rng.random_range(0.0..1.0);
+            let m = if r < keep { scale } else { 0.0 };
+            mask[i] = m;
+            out[i] = x.data()[i] * m;
         }
         self.mask = mask;
-        out
+        self.mask_shape = x.shape();
+        Matrix::from_flat(out, x.rows(), x.cols())
     }
 
-    /// forward で保存した mask を勾配にも適用する。
-    /// mask が空 (= 推論モードで forward した) のときは素通し。
-    pub fn backward(&self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    /// Matrix 直叩き backward。
+    pub fn backward_matrix(&self, dl_dy: &Matrix) -> Matrix {
         if self.mask.is_empty() {
-            return dl_dy.to_vec();
+            return dl_dy.clone();
         }
-        assert_eq!(self.mask.len(), dl_dy.len());
-        dl_dy
-            .iter()
-            .zip(self.mask.iter())
-            .map(|(dy_row, m_row)| {
-                debug_assert_eq!(dy_row.len(), m_row.len());
-                dy_row.iter().zip(m_row.iter()).map(|(g, m)| g * m).collect()
-            })
-            .collect()
+        assert_eq!(self.mask_shape, dl_dy.shape());
+        let n = dl_dy.data().len();
+        let mut out = vec![0.0f32; n];
+        for i in 0..n {
+            out[i] = dl_dy.data()[i] * self.mask[i];
+        }
+        Matrix::from_flat(out, dl_dy.rows(), dl_dy.cols())
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dy);
+        self.backward_matrix(&dy).to_jagged()
     }
 }
 

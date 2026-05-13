@@ -1,13 +1,18 @@
 use std::io::{Error, ErrorKind, Result};
 
 use crate::{
-    adam_w::AdamW, checkpoint::Checkpointable, layer_normalization::LayerNormalization,
+    adam_w::AdamW, checkpoint::Checkpointable, layer_normalization::LayerNormalization, matrix::Matrix,
     root_mean_square_layer_normalization::RootMeanSquareLayerNormalization,
 };
 
 pub trait Normalization: Checkpointable {
+    /// 旧 API。 jagged で受け取り jagged で返す。 内部では Matrix 版に変換して呼ぶ。
+    /// 新規コードからは `forward_matrix` を直接呼ぶこと (allocation を 1 ペア節約できる)。
     fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>>;
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>>;
+    /// Matrix 直叩き API (Phase 7 高速化で導入)。 forward 中は内部 cache が Matrix で保持される。
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix;
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix;
     fn zero_grad(&mut self);
     fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str);
 }

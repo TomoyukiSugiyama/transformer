@@ -7,6 +7,7 @@ use crate::feed_forward::FeedForward;
 use crate::feed_forward::FeedForwardKind;
 use crate::feed_forward::load_feed_forward;
 use crate::kv_cache::KvCache;
+use crate::matrix::Matrix;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -23,8 +24,8 @@ pub struct TransformerBlock {
     ffn: Box<dyn FeedForward>,
     norm2: Box<dyn Normalization>,
     drop_ffn: Dropout,
-    cache_x: Vec<Vec<f32>>,
-    cache_x2: Vec<Vec<f32>>,
+    cache_x: Matrix,
+    cache_x2: Matrix,
 }
 
 impl TransformerBlock {
@@ -44,8 +45,8 @@ impl TransformerBlock {
             ffn: load_feed_forward(feed_forward_kind, d_model, d_ff),
             norm2: load_normalization(normalization_kind, d_model),
             drop_ffn: Dropout::new(dropout_p),
-            cache_x: Vec::new(),
-            cache_x2: Vec::new(),
+            cache_x: Matrix::zeros(0, 0),
+            cache_x2: Matrix::zeros(0, 0),
         }
     }
 
@@ -54,46 +55,55 @@ impl TransformerBlock {
         self.drop_ffn.set_training(training);
     }
 
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
     /// Pre-LN: Norm → Sublayer → Dropout → Residual
-    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
-        self.cache_x = x.to_vec();
-        let norm1 = self.norm1.forward(x);
-        let attn_out = self.mha.forward(&norm1, mask);
-        let attn_dropped = self.drop_attn.forward(&attn_out);
-        let x2 = residual_add(x, &attn_dropped);
+    pub fn forward_matrix(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+        self.cache_x = x.clone();
+        let norm1 = self.norm1.forward_matrix(x);
+        let attn_out = self.mha.forward_matrix(&norm1, mask);
+        let attn_dropped = self.drop_attn.forward_matrix(&attn_out);
+        let mut x2 = x.clone();
+        x2.add_in_place(&attn_dropped);
 
         self.cache_x2 = x2.clone();
-        let norm2 = self.norm2.forward(&x2);
-        let ffn_out = self.ffn.forward(&norm2);
-        let ffn_dropped = self.drop_ffn.forward(&ffn_out);
-        let out = residual_add(&x2, &ffn_dropped);
-
+        let norm2 = self.norm2.forward_matrix(&x2);
+        let ffn_out = self.ffn.forward_matrix(&norm2);
+        let ffn_dropped = self.drop_ffn.forward_matrix(&ffn_out);
+        let mut out = x2;
+        out.add_in_place(&ffn_dropped);
         out
     }
 
-    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
+    pub fn backward_matrix(&mut self, dl_dout: &Matrix) -> Matrix {
         // FFN side
-        // out = x2 + drop_ffn(ffn(norm2(x2)))
-        // dl_dout は x2 と ffn_dropped の両方に流れる (residual)
-        let dl_dffn_dropped = dl_dout;
-        let dl_dx2_from_res = dl_dout.to_vec();
+        let dl_dffn_out = self.drop_ffn.backward_matrix(dl_dout);
+        let dl_dnorm2 = self.ffn.backward_matrix(&dl_dffn_out);
+        let dl_dx2_from_ffn = self.norm2.backward_matrix(&dl_dnorm2);
 
-        let dl_dffn_out = self.drop_ffn.backward(dl_dffn_dropped);
-        let dl_dnorm2 = self.ffn.backward(&dl_dffn_out);
-        let dl_dx2_from_ffn = self.norm2.backward(&dl_dnorm2);
-
-        let dl_dx2 = residual_add(&dl_dx2_from_res, &dl_dx2_from_ffn);
+        let mut dl_dx2 = dl_dout.clone();
+        dl_dx2.add_in_place(&dl_dx2_from_ffn);
 
         // MHA side
-        // x2 = x + drop_attn(mha(norm1(x)))
-        let dl_dattn_dropped = &dl_dx2;
-        let dl_dx_from_res = dl_dx2.clone();
+        let dl_dattn_out = self.drop_attn.backward_matrix(&dl_dx2);
+        let dl_dnorm1 = self.mha.backward_matrix(&dl_dattn_out);
+        let dl_dx_from_mha = self.norm1.backward_matrix(&dl_dnorm1);
 
-        let dl_dattn_out = self.drop_attn.backward(dl_dattn_dropped);
-        let dl_dnorm1 = self.mha.backward(&dl_dattn_out);
-        let dl_dx_from_mha = self.norm1.backward(&dl_dnorm1);
+        let mut dl_dx = dl_dx2;
+        dl_dx.add_in_place(&dl_dx_from_mha);
+        dl_dx
+    }
 
-        residual_add(&dl_dx_from_res, &dl_dx_from_mha)
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, x: &[Vec<f32>], mask: Option<&Vec<Vec<bool>>>) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm, mask).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dout);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     /// 推論専用 (KV cache あり) の 1 token 前進。
@@ -138,13 +148,6 @@ impl TransformerBlock {
         self.ffn.apply_gradients(opt, &format!("{prefix}.ffn"));
         self.norm2.apply_gradients(opt, &format!("{prefix}.norm2"));
     }
-}
-
-fn residual_add(x: &[Vec<f32>], sublayer_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    x.iter()
-        .zip(sublayer_out.iter())
-        .map(|(xi, si)| xi.iter().zip(si.iter()).map(|(a, b)| a + b).collect())
-        .collect()
 }
 
 impl Checkpointable for TransformerBlock {

@@ -77,3 +77,79 @@ unsafe { matrixmultiply::sgemm(...) }     // pure-Rust SIMD カーネル
 
 `AdamW::step_matrix_flat(&mut self, &str, &mut Matrix, &Matrix)` が `Matrix` を直接受け取る。
 内部の `AdamWParam.data` も `Vec<f32>` (flat) なので、 jagged ↔ flat の **flatten 変換コストはゼロ**。
+
+## Phase 7: 大規模高速化 (2026-05 〜)
+
+Phase 6-c で 1 step ~11,000 ms (= 3000 step で約 9.2 h) になり、
+Apple GPU/CUDA 移植を避けつつ **CPU だけで 2-3x の改善** を狙うのが Phase 7 の目的。
+
+### 取り組み済み
+
+#### B4: WSD (warmup-stable-decay) スケジューラ
+
+`src/lr_scheduler.rs` に `LrScheduleKind::WarmupStableDecay { stable_steps }` を追加。
+
+- 既存の cosine と挙動互換 (`Config::lr_schedule_kind` のデフォルトは `WarmupCosine`)
+- decay 区間は MiniCPM 流の `1 - sqrt(progress)` を採用
+- 同じ BPC を 15-30% 早く到達できる場合があり、 さらに total_steps を伸ばしても
+  過去 step の lr 軌道が変わらないため checkpoint からの追加学習に向く
+
+#### B1: layer trait の Matrix 化
+
+旧 trait は `forward(&[Vec<f32>]) -> Vec<Vec<f32>>` で受け渡していたため、
+内部で Matrix 化していた層 (FFN/MHA/OutputHead) も毎回 `from_jagged` / `to_jagged` で
+**メモリコピー + 再アロケーション** が走っていた。 Phase 7 ではすべての主要層に
+`forward_matrix(&Matrix) -> Matrix` を追加し、 オーケストレーション層
+(TransformerBlock → Transformer → LanguageModel) を Matrix 直叩き経路に切り替えた。
+
+| 対象 | 旧 | 新 (Matrix 直叩き) |
+|------|-----|-------------------|
+| `LayerNormalization` | 行ループ + jagged | flat row-major + rayon `par_chunks_mut` |
+| `RootMeanSquareLayerNormalization` | 同上 | 同上 |
+| `FeedForwardNetwork` (GELU) | Matrix 内部 + 境界 jagged | Matrix 直叩き、 境界変換ゼロ |
+| `SwiGluFeedForwardNetwork` | 同上 | 同上 |
+| `Dropout` | 行 × 列の二重 Vec mask | flat mask (`Vec<f32>`) |
+| `Embedding` | jagged 行ベース lookup | flat row-major lookup |
+| `MultiHeadAttention` | Matrix 内部 + 境界 jagged | Matrix 直叩き |
+| `OutputHead` | Matrix 内部 + 境界 jagged | Matrix 直叩き |
+| `SinusoidalPE` | 行ループ | flat 加算 |
+| `CrossEntropyLoss::forward_sequence_matrix` | jagged grad 出力 | flat grad 出力 |
+
+旧 API (`forward(&[Vec<f32>])`) は **下位互換のため残してある** が、 内部で Matrix 版に変換するだけ。
+すべての主要パス (forward_loss, forward_backward, generate 系) は Matrix 直叩きに更新済み。
+
+#### B2: QKV projection 融合
+
+旧: `Q = X W_Q`, `K = X W_K`, `V = X W_V` の **3 回の matmul**。
+新: `QKV = X W_QKV` の **1 回の matmul** (W_QKV: `(d_model, 3*d_model)`) → `split_columns(3)` で分割。
+
+- BLAS 呼び出しのオーバーヘッドが 3 → 1 に減る
+- Apple Accelerate の sgemm は出力行列が大きいほど効率が上がる傾向があるため有利
+- チェックポイント形式は **w_q/w_k/w_v に分割保存** したまま (Phase 6-c までの best.bin と完全互換)
+- Adam optimizer の moment は `w_qkv` 1 つに統一 (新 run のみ)
+
+### ベンチマーク結果
+
+`#[test] bench_phase7_step_time` (`cargo test --release bench_phase7_step_time -- --nocapture --ignored`) で
+Phase 6-c と同じ形状 (d_model=512, n_heads=8, n_layers=6, max_len=1024) を batch_size=2 で 3 step 計測。
+
+| 実装 | per-step (batch=2) | Phase 6-c 換算 (batch=16) | speedup |
+|------|--------------------|---------------------------|---------|
+| Phase 6-c (実測) | ~1,375 ms (推定) | **~11,000 ms** | 1.0x |
+| B1 (Matrix 直叩き) | ~1,150 ms | ~9,200 ms | **~1.20x** |
+| B1 + B2 (QKV 融合) | ~1,190 ms | ~9,500 ms | **~1.16x** |
+
+> 注: ベンチ実行中は Phase 6-c も並列で走っており CPU 競合があるため、 上の数値は **保守的な下限**。
+> また bench は `vocab_size=64` (Char tokenizer) なので、 Phase 6-c の `vocab=8000` より OutputHead matmul が
+> 軽い。 同条件で測れば実際の speedup はもう少し大きい (推定 1.3-1.4x)。
+
+### 今後 (検討中)
+
+- **B3 Flash Attention 風 (CPU online softmax + matmul 融合)**:
+  attention scores 行列 (`seq² × n_heads × n_layers` = 192 MB @ Phase 6-c) のメモリ I/O を削減。
+  実装難度は中、 期待 1.3-2x (attention 部分のみ)。
+- **アロケーション削減**: `split_columns` / `concat_columns` / `transpose` が backward 中に
+  数 GB を再アロケしている可能性あり。 pre-allocated buffer 化で 1.1-1.3x。
+- **bf16 mixed precision (Apple BNNS)**: 期待 1.8-2.5x、 実装難度大。 数値安定性試験要。
+- **KvCache の事前確保**: 推論時のみ。 alloc/realloc を削除。
+

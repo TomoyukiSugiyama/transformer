@@ -1,3 +1,5 @@
+use crate::matrix::Matrix;
+
 pub struct CrossEntropyLoss;
 
 impl CrossEntropyLoss {
@@ -21,37 +23,52 @@ impl CrossEntropyLoss {
         (loss, grad)
     }
 
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    /// `logits` は (seq_len, vocab) の Matrix、 戻り値 grads も同形。
+    /// rayon で行ごとに並列化、 grads の内部バッファは flat。
+    pub fn forward_sequence_matrix(
+        logits: &Matrix,
+        targets: &[usize],
+        mask: &[u8],
+    ) -> (f32, Matrix) {
+        use rayon::prelude::*;
+
+        let (seq_len, vocab) = logits.shape();
+        assert_eq!(seq_len, targets.len(), "targets length mismatch");
+        assert_eq!(seq_len, mask.len(), "mask length mismatch");
+
+        let valid_count = mask.iter().filter(|&&m| m == 1).count() as f32;
+        let inv_count = 1.0 / valid_count.max(1.0);
+
+        let mut grad_data = vec![0.0f32; seq_len * vocab];
+        // 行ごとに loss + grad を埋めて、 loss を sum
+        let total_loss: f32 = grad_data
+            .par_chunks_mut(vocab)
+            .enumerate()
+            .map(|(t, g_row)| {
+                if mask[t] == 0 {
+                    return 0.0;
+                }
+                let logits_row = logits.row(t);
+                let (loss, grad) = Self::forward(logits_row, targets[t]);
+                for j in 0..vocab {
+                    g_row[j] = grad[j] * inv_count;
+                }
+                loss
+            })
+            .sum();
+        let avg_loss = total_loss * inv_count;
+        (avg_loss, Matrix::from_flat(grad_data, seq_len, vocab))
+    }
+
+    /// 旧 API: jagged。
     pub fn forward_sequence(
         logits_seq: &[Vec<f32>],
         targets: &[usize],
         mask: &[u8],
     ) -> (f32, Vec<Vec<f32>>) {
-        use rayon::prelude::*;
-
-        let valid_count = mask.iter().filter(|&&m| m == 1).count() as f32;
-        let inv_count = 1.0 / valid_count.max(1.0);
-        let vocab = logits_seq[0].len();
-
-        // 各 token 独立に (loss, scaled_grad) を計算（masked は zero）
-        let results: Vec<(f32, Vec<f32>)> = logits_seq
-            .par_iter()
-            .zip(targets.par_iter())
-            .zip(mask.par_iter())
-            .map(|((logits, &target), &m)| {
-                if m == 0 {
-                    (0.0, vec![0.0f32; vocab])
-                } else {
-                    let (loss, grad) = Self::forward(logits, target);
-                    let scaled: Vec<f32> = grad.into_iter().map(|v| v * inv_count).collect();
-                    (loss, scaled)
-                }
-            })
-            .collect();
-
-        let total_loss: f32 = results.iter().map(|(l, _)| *l).sum();
-        let avg_loss = total_loss * inv_count;
-        let grads: Vec<Vec<f32>> = results.into_iter().map(|(_, g)| g).collect();
-
-        (avg_loss, grads)
+        let m = Matrix::from_jagged(logits_seq);
+        let (l, g) = Self::forward_sequence_matrix(&m, targets, mask);
+        (l, g.to_jagged())
     }
 }

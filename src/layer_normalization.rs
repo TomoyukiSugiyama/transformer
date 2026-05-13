@@ -2,6 +2,9 @@ use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 
+use rayon::prelude::*;
+
+use crate::matrix::Matrix;
 use crate::normalization::Normalization;
 use crate::{
     adam_w::AdamW,
@@ -16,8 +19,8 @@ pub struct LayerNormalization {
     grad_gamma: Vec<f32>, // [d_model]
     grad_beta: Vec<f32>,  // [d_model]
 
-    cache_x_hat: Vec<Vec<f32>>, // [seq_len, d_model]
-    cache_inv_std: Vec<f32>,    // [seq_len] — 1/σ
+    cache_x_hat: Matrix,     // (seq_len, d_model)
+    cache_inv_std: Vec<f32>, // (seq_len,) — 1/σ
 }
 
 impl LayerNormalization {
@@ -28,73 +31,127 @@ impl LayerNormalization {
             eps: 1e-6,
             grad_gamma: vec![0.0; d_model],
             grad_beta: vec![0.0; d_model],
-            cache_x_hat: Vec::new(),
+            cache_x_hat: Matrix::zeros(0, 0),
             cache_inv_std: Vec::new(),
         }
     }
 
-    fn normalization(&mut self, x: &[f32]) -> Vec<f32> {
-        let n = x.len() as f32;
-        let mean = x.iter().sum::<f32>() / n;
-        let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
-        let inv_std = 1.0 / (var + self.eps).sqrt();
+    /// Matrix 直叩き API。 行ごとに rayon で並列化。
+    /// cache_x_hat / cache_inv_std を更新し backward から再利用する。
+    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        let (seq_len, d_model) = x.shape();
+        let n = d_model as f32;
+        let eps = self.eps;
+        let gamma = &self.gamma;
+        let beta = &self.beta;
 
-        let x_hat: Vec<f32> = x.iter().map(|v| (v - mean) * inv_std).collect();
+        // 出力: y, x_hat, inv_std を一括に確保
+        let mut y_data = vec![0.0f32; seq_len * d_model];
+        let mut xh_data = vec![0.0f32; seq_len * d_model];
+        let mut inv_std = vec![0.0f32; seq_len];
 
-        let y: Vec<f32> = x_hat
-            .iter()
+        y_data
+            .par_chunks_mut(d_model)
+            .zip(xh_data.par_chunks_mut(d_model))
+            .zip(inv_std.par_iter_mut())
             .enumerate()
-            .map(|(i, xh)| self.gamma[i] * xh + self.beta[i])
-            .collect();
+            .for_each(|(i, ((y_row, xh_row), inv_s_slot))| {
+                let xi = x.row(i);
+                let mean = xi.iter().sum::<f32>() / n;
+                let var = xi.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
+                let inv_s = 1.0 / (var + eps).sqrt();
+                *inv_s_slot = inv_s;
+                for j in 0..d_model {
+                    let xh = (xi[j] - mean) * inv_s;
+                    xh_row[j] = xh;
+                    y_row[j] = gamma[j] * xh + beta[j];
+                }
+            });
 
-        self.cache_x_hat.push(x_hat);
-        self.cache_inv_std.push(inv_std);
-
-        y
+        self.cache_x_hat = Matrix::from_flat(xh_data, seq_len, d_model);
+        self.cache_inv_std = inv_std;
+        Matrix::from_flat(y_data, seq_len, d_model)
     }
 
+    /// Matrix 直叩き backward。 grad_gamma / grad_beta は加算 (zero_grad 後に呼ぶ前提)。
+    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        let (seq_len, d_model) = dl_dy.shape();
+        let d = d_model as f32;
+        let gamma = &self.gamma;
+
+        // --- grad_gamma / grad_beta の集計 ---
+        // grad_gamma[j] += Σ_i dy[i,j] * x_hat[i,j]
+        // grad_beta[j]  += Σ_i dy[i,j]
+        // rayon で並列に部分和を取って最後に集計する。
+        let xh = &self.cache_x_hat;
+        let (sum_gamma, sum_beta) = (0..seq_len)
+            .into_par_iter()
+            .fold(
+                || (vec![0.0f32; d_model], vec![0.0f32; d_model]),
+                |(mut g, mut b), i| {
+                    let dy_row = dl_dy.row(i);
+                    let xh_row = xh.row(i);
+                    for j in 0..d_model {
+                        g[j] += dy_row[j] * xh_row[j];
+                        b[j] += dy_row[j];
+                    }
+                    (g, b)
+                },
+            )
+            .reduce(
+                || (vec![0.0f32; d_model], vec![0.0f32; d_model]),
+                |(mut ga, mut ba), (gb, bb)| {
+                    for j in 0..d_model {
+                        ga[j] += gb[j];
+                        ba[j] += bb[j];
+                    }
+                    (ga, ba)
+                },
+            );
+        for j in 0..d_model {
+            self.grad_gamma[j] += sum_gamma[j];
+            self.grad_beta[j] += sum_beta[j];
+        }
+
+        // --- dl/dx を行ごとに計算 (各行独立) ---
+        let inv_std = &self.cache_inv_std;
+        let mut dx_data = vec![0.0f32; seq_len * d_model];
+        dx_data
+            .par_chunks_mut(d_model)
+            .enumerate()
+            .for_each(|(i, dx_row)| {
+                let dy_row = dl_dy.row(i);
+                let xh_row = xh.row(i);
+                let is = inv_std[i];
+
+                // g_j = γ_j * dy_j
+                let mut sum_g = 0.0f32;
+                let mut sum_g_xh = 0.0f32;
+                let mut g = vec![0.0f32; d_model];
+                for j in 0..d_model {
+                    let gv = gamma[j] * dy_row[j];
+                    g[j] = gv;
+                    sum_g += gv;
+                    sum_g_xh += gv * xh_row[j];
+                }
+                let coef = is / d;
+                for j in 0..d_model {
+                    dx_row[j] = coef * (d * g[j] - sum_g - xh_row[j] * sum_g_xh);
+                }
+            });
+        Matrix::from_flat(dx_data, seq_len, d_model)
+    }
+
+    /// 旧 API: jagged → Matrix 経由で forward_matrix を呼ぶ。
     pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_x_hat.clear();
-        self.cache_inv_std.clear();
-
-        x.iter().map(|row| self.normalization(row)).collect()
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm).to_jagged()
     }
 
-    /// dl_dy: [seq_len, d_model]
+    /// 旧 API: jagged → Matrix 経由で backward_matrix を呼ぶ。
     pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let d = self.gamma.len() as f32;
-
-        for (dy_row, xh_row) in dl_dy.iter().zip(self.cache_x_hat.iter()) {
-            for j in 0..self.gamma.len() {
-                self.grad_gamma[j] += dy_row[j] * xh_row[j];
-                self.grad_beta[j] += dy_row[j];
-            }
-        }
-
-        let mut dl_dx = Vec::with_capacity(dl_dy.len());
-        for (i, dy_row) in dl_dy.iter().enumerate() {
-            let inv_std = self.cache_inv_std[i];
-            let xh_row = &self.cache_x_hat[i];
-
-            // g_j = γ_j * dy_j
-            let g: Vec<f32> = dy_row
-                .iter()
-                .zip(self.gamma.iter())
-                .map(|(dy, gam)| dy * gam)
-                .collect();
-
-            let sum_g: f32 = g.iter().sum();
-            let sum_g_xh: f32 = g.iter().zip(xh_row).map(|(gj, xhj)| gj * xhj).sum();
-
-            let dx_row: Vec<f32> = g
-                .iter()
-                .zip(xh_row.iter())
-                .map(|(gi, xhi)| inv_std / d * (d * gi - sum_g - xhi * sum_g_xh))
-                .collect();
-            dl_dx.push(dx_row);
-        }
-
-        dl_dx
+        let dy = Matrix::from_jagged(dl_dy);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {
@@ -119,6 +176,14 @@ impl Normalization for LayerNormalization {
 
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
         self.backward(dl_dy)
+    }
+
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        self.forward_matrix(x)
+    }
+
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

@@ -67,33 +67,32 @@ impl SwiGluFeedForwardNetwork {
         s + x * s * (1.0 - s)
     }
 
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let x_m = Matrix::from_jagged(x);
-        let gate = x_m.matmul(&self.w_gate);
-        let up = x_m.matmul(&self.w_up);
+    /// Matrix 直叩き forward。
+    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        let gate = x.matmul(&self.w_gate);
+        let up = x.matmul(&self.w_up);
 
         // a = swish(gate) * up
         let a = gate.elementwise_with(&up, |g, u| Self::swish(g) * u);
 
         let y = a.matmul(&self.w_down);
 
-        self.cache_x = x_m;
+        self.cache_x = x.clone();
         self.cache_gate = gate;
         self.cache_up = up;
         self.cache_a = a;
 
-        y.to_jagged()
+        y
     }
 
-    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dl_dy_m = Matrix::from_jagged(dl_dy);
-
+    /// Matrix 直叩き backward。
+    pub fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
         // W_down の grad
-        let g_w_down = self.cache_a.transpose().matmul(&dl_dy_m);
+        let g_w_down = self.cache_a.transpose().matmul(dl_dy);
         self.grad_w_down.add_in_place(&g_w_down);
 
         // dL/da
-        let dl_da = dl_dy_m.matmul(&self.w_down.transpose());
+        let dl_da = dl_dy.matmul(&self.w_down.transpose());
 
         // dL/dgate, dL/dup を作る (要素積 + Swish' 適用)
         let dl_da_du = dl_da.elementwise_with(&self.cache_up, |da, u| da * u);
@@ -113,7 +112,19 @@ impl SwiGluFeedForwardNetwork {
         let mut dl_dx = dl_dx_gate;
         dl_dx.add_in_place(&dl_dx_up);
 
-        dl_dx.to_jagged()
+        dl_dx
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dy);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {
@@ -144,6 +155,14 @@ impl FeedForward for SwiGluFeedForwardNetwork {
 
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
         self.backward(dl_dy)
+    }
+
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        self.forward_matrix(x)
+    }
+
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

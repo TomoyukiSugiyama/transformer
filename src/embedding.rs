@@ -8,6 +8,7 @@ use rand::rng;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
+use crate::matrix::Matrix;
 
 pub struct Embedding {
     weight: Vec<Vec<f32>>,      // [vocab_size, d_model]
@@ -49,14 +50,27 @@ impl Embedding {
         &self.weight[token_id]
     }
 
-    pub fn forward(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    /// 戻り値は (seq_len, d_model) の Matrix。
+    pub fn forward_matrix(&mut self, token_ids: &[usize]) -> Matrix {
         self.cache_ids = token_ids.to_vec();
         let scale = (self.d_model as f32).sqrt();
+        let n = token_ids.len();
+        let d = self.d_model;
+        let mut data = vec![0.0f32; n * d];
+        for (i, &id) in token_ids.iter().enumerate() {
+            let row = self.lookup(id);
+            let dst = &mut data[i * d..(i + 1) * d];
+            for j in 0..d {
+                dst[j] = row[j] * scale;
+            }
+        }
+        Matrix::from_flat(data, n, d)
+    }
 
-        token_ids
-            .iter()
-            .map(|&id| self.lookup(id).iter().map(|&v| v * scale).collect())
-            .collect()
+    /// 旧 API: jagged。 内部で Matrix 版を呼ぶ。
+    pub fn forward(&mut self, token_ids: &[usize]) -> Vec<Vec<f32>> {
+        self.forward_matrix(token_ids).to_jagged()
     }
 
     /// 推論専用: 単一 token id を 1 ベクトルに埋め込む (内部 cache は触らない)。
@@ -66,20 +80,27 @@ impl Embedding {
         self.lookup(token_id).iter().map(|&v| v * scale).collect()
     }
 
-    pub fn backward(&mut self, dl_dx: &[Vec<f32>]) {
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
+    pub fn backward_matrix(&mut self, dl_dx: &Matrix) {
         let scale = (self.d_model as f32).sqrt();
-
+        let d = self.d_model;
         for (i, &id) in self.cache_ids.iter().enumerate() {
             if let Some(pad) = self.pad_id {
                 if id == pad {
                     continue;
                 }
             }
-
-            for j in 0..self.d_model {
-                self.grad_weight[id][j] += dl_dx[i][j] * scale;
+            let dx_row = dl_dx.row(i);
+            for j in 0..d {
+                self.grad_weight[id][j] += dx_row[j] * scale;
             }
         }
+    }
+
+    /// 旧 API: jagged。
+    pub fn backward(&mut self, dl_dx: &[Vec<f32>]) {
+        let dy = Matrix::from_jagged(dl_dx);
+        self.backward_matrix(&dy);
     }
 
     pub fn zero_grad(&mut self) {

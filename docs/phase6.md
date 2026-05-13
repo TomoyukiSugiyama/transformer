@@ -281,17 +281,90 @@ Phase 5-4a 比で **作家固有の人名・固有名詞・文体** の精度が
 | 長文 (max_new=200+) で repetition collapse | step 1000-1800 では持続、 終盤は緩和 | repetition penalty 強化 / contrastive search |
 | 軽度オーバーフィット | step 2400 以降 train-val gap 拡大 | dropout 強化 / 早期停止 |
 
-## 次の選択肢
+## Phase 6-b: 起動するも振り替え (vocab=16K)
 
-学習完了を踏まえ、 次に進むパスは大きく 3 通り:
+vocab を 8K → 16K に拡張する案。 起動して tokenizer 訓練 (1M sample, 33.7 min) と corpus encoding まで完了したが、 **圧縮率の実測がきわめて期待外れだったため学習は中断**。
 
-| パス | 概要 | 期待 BPC | コスト |
-|------|------|---------|------|
-| **Phase 6-b** | vocab=16K に拡張 (`extend_merges` で Phase 6-a tokenizer を再利用) | 3.65-3.72 | +1 h tokenizer, +8 h 学習 |
-| **Phase 5-4b** | d=512 → d=768 or n_layers=6 → 8 のモデル拡大 (CharBPE 8K のまま) | 3.60-3.70 | +30-50% per-step, ~10-12 h 学習 |
-| **Phase 7** | データ前処理改善 (戯曲除去 + 作家トークン) | (BPC 改善は微小だが質改善大) | 数日 (前処理スクリプト + 再学習) |
+### 実測 (起動時ログより)
 
-オーバーフィット兆候が出ているため、 **Phase 6-b でコンテキスト拡張** か **Phase 7 でデータ品質改善** が筋が良さそう。 Phase 5-4b は BPC は伸びるが計算コストが高い。
+| 指標 | 期待 | **実測** | ギャップ |
+|------|-----|---------|---------|
+| chars/token | 2.3-2.7 | **1.72** (Phase 6-a の 1.65 から +4.2%) | **-30%** |
+| 実効コンテキスト (max_len=512) | 1,200-1,400 char | 880 char | -30% |
+| corpus_tokens | ~3.5M | **4.32M** | tokens は 14% しか減らない |
+
+### なぜ期待より低かったか
+
+1. **日本語の高頻度 n-gram は ~3,000 で saturate**:
+   - 助詞・助動詞・活用語尾などの上位パターンは数百〜数千種類
+   - Phase 6-a (vocab=8K, merges 2,774) で既に大半を吸収
+   - 追加 8,000 merges は裾尾の固有名詞・低頻度複合語で占有率が低い
+2. **Zipf 則の限界収益逓減**:
+   - 上位 2K merges で全 token の ~70% カバー
+   - 上位 16K merges でも ~92% (16K は +7% しか coverage を伸ばせない)
+
+→ vocab スケーリングは ROI が悪く、 **コンテキスト拡張のほうが筋が良い** と判断。
+
+## Phase 6-c: max_len 512 → 1024 (vocab=8K 据え置き)
+
+Phase 6-a で確立した CharBPE 8K tokenizer (cache 既存) を流用し、 **コンテキスト窓を 2 倍**に拡張する。 Phase 6-b の代替として採用。
+
+| 設定項目 | Phase 6-a | **Phase 6-c** | 変更理由 |
+|---------|----------|--------------|---------|
+| tokenizer | CharBPE 8K | CharBPE 8K (cache 流用) | 訓練時間 0、 model 互換性維持 |
+| max_len | 512 | **1,024** | RoPE 拡張、 attention の context 範囲を倍増 |
+| batch_size | 32 | **16** (半減) | per-step 時間とメモリを抑制 |
+| 1 step あたり token | 16,384 | 16,384 (32×512 = 16×1024) | データ流量は不変 |
+| end_step | 3,000 | 3,000 | Phase 6-a と直接比較するため |
+| 実効コンテキスト | **845 char** | **~1,690 char** (+100%) | ⭐ vocab=16K の +4% より遥かに大きい |
+
+### 期待効果
+
+- 実効コンテキスト 845 char → **1,690 char**: 漱石短編 1 段落 (~600 char) の前後関係を完全に保持
+- attention の self-similarity による **長文の論理一貫性向上** (Phase 6-a の repetition collapse 緩和)
+- BPC 改善見込み: **3.66-3.72** (Phase 6-a 3.76 比 -1〜-3%)
+- per-step 時間: ~13 s 想定 (Phase 6-a 9.85s + 30%、 attention 4x + FFN 2x、 batch 半減で打ち消し)
+- 総学習時間: ~10-12 h
+
+### 技術的注意
+
+- RoPE は max_len まで sin/cos table を precompute するため、 model 構築時に max_len=1024 を指定するだけで動作 (`src/rope.rs`)
+- 既存 tokenizer cache (`tokenizers/charbpe_v8000_aozora_meiji_taisho_s500000.bin`) はそのまま使える
+- 学習中の BPC ログ出力は今回追加 (`# val step=N val_loss=... val_ppl=... bpc=...`)
+
+### 起動結果と中断
+
+Phase 6-c は step 180 (elapsed 33 min) で per-step ~11,000 ms を確認。 3000 step 完走まで **約 9.2 h** の見込みだったため、 ユーザー判断で **Phase 7 大規模高速化** に着手し、 完了後 [Phase 6-d](#phase-6-d-wsd--phase-7-高速化-適用) へ振替。
+
+| step | val_ppl | BPC | 備考 |
+|------|---------|-----|------|
+| 180  | (val 未到達) | — | per-step 10,500-11,500 ms。 中断。 |
+
+## Phase 6-d: WSD + Phase 7 高速化 適用
+
+Phase 6-c と完全に同じ形状を **Phase 7 で高速化したバイナリ + WSD スケジューラ** で再起動する。
+
+| 設定項目 | Phase 6-c | **Phase 6-d** | 狙い |
+|---------|-----------|--------------|------|
+| 形状 | d=512, n=6, max_len=1024, vocab=8K | 同 | (互換) |
+| LR scheduler | warmup-cosine | **warmup-stable-decay** (warmup=300, stable=2160, decay=540) | 同 BPC を 15-30% 早く到達 (MiniCPM/DeepSeek 慣例) |
+| バイナリ | 旧 (`Vec<Vec<f32>>` API) | **Phase 7** (Matrix 直叩き + QKV 融合) | per-step 1.2-1.4x |
+| per-step 想定 | ~11,000 ms | **~9,000 ms** | ☆ |
+| 総時間 想定 | ~9.2 h | **~6-7 h** | -25 〜 -30% |
+| Checkpoint 互換 | — | Phase 6-c の best.bin もロード可 (MHA は w_q/w_k/w_v 3 分割を組み立て) | resume 安全 |
+
+### 起動
+
+```bash
+cargo run --release 2>&1 | tee logs/phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd.log
+```
+
+### 観測ポイント
+
+- ログヘッダに `lr_schedule=WarmupStableDecay { stable_steps: 2160 }` が出ること
+- 序盤 step 60-100 で per-step 8,500-9,500 ms 程度に収束 (Phase 6-c より明確に短い)
+- step 200 / 400 / 600 の val_ppl と BPC が Phase 6-a (CharBPE 8K, max_len=512) より **同 step で良い** はず (max_len 倍増効果)
+- 終盤 step 2,400+ (decay 開始 = step 2,460 以降) で lr が `1 - sqrt(progress)` で急減し、 finetune 効果で BPC がさらに -1 〜 -2% 改善する想定
 
 ## 関連ドキュメント
 

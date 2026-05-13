@@ -74,8 +74,9 @@ impl FeedForwardNetwork {
         0.5 * (1.0 + tanh_val) + 0.5 * x * sech2 * c * (1.0 + 3.0 * 0.044715 * x.powi(2))
     }
 
-    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_x = Matrix::from_jagged(x);
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    pub fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        self.cache_x = x.clone();
 
         // Layer 1: z1 = x @ W1 + b1   shape: (seq_len, d_ff)
         let mut z1 = self.cache_x.matmul(&self.w1);
@@ -91,27 +92,26 @@ impl FeedForwardNetwork {
         self.cache_z1 = z1;
         self.cache_a = a;
 
-        z2.to_jagged()
+        z2
     }
 
-    pub fn backward(&mut self, dl_dz2: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dl_dz2_m = Matrix::from_jagged(dl_dz2);
-
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
+    pub fn backward_matrix(&mut self, dl_dz2: &Matrix) -> Matrix {
         // --- W2 の勾配 ---
         // grad_w2 += cache_a^T @ dl_dz2   shape: (d_ff, d_model)
-        let g_w2 = self.cache_a.transpose().matmul(&dl_dz2_m);
+        let g_w2 = self.cache_a.transpose().matmul(dl_dz2);
         self.grad_w2.add_in_place(&g_w2);
 
         // --- b2 の勾配 ---
         // grad_b2 += Σ_t dl_dz2[t]
-        let g_b2 = dl_dz2_m.sum_rows_into_cols();
+        let g_b2 = dl_dz2.sum_rows_into_cols();
         for (b, g) in self.grad_b2.iter_mut().zip(g_b2.iter()) {
             *b += *g;
         }
 
         // --- GELU 手前まで逆伝播 ---
         // dL/da = dl_dz2 @ W2^T   shape: (seq_len, d_ff)
-        let dl_da = dl_dz2_m.matmul(&self.w2.transpose());
+        let dl_da = dl_dz2.matmul(&self.w2.transpose());
 
         // dL/dz1 = dL/da ⊙ GELU'(z1)   shape: (seq_len, d_ff)
         let dl_dz1 = dl_da.elementwise_with(&self.cache_z1, |da, z| da * Self::gelu_grad(z));
@@ -130,7 +130,19 @@ impl FeedForwardNetwork {
 
         // --- 上流への勾配 ---
         // dl_dx = dl_dz1 @ W1^T   shape: (seq_len, d_model)
-        dl_dz1.matmul(&self.w1.transpose()).to_jagged()
+        dl_dz1.matmul(&self.w1.transpose())
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dz2: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dz2);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {
@@ -155,6 +167,14 @@ impl FeedForward for FeedForwardNetwork {
 
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>> {
         self.backward(dl_dy)
+    }
+
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix {
+        self.forward_matrix(x)
+    }
+
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix {
+        self.backward_matrix(dl_dy)
     }
 
     fn zero_grad(&mut self) {

@@ -2,13 +2,16 @@ use std::io::{Error, ErrorKind, Result};
 
 use crate::{
     adam_w::AdamW, checkpoint::Checkpointable, feed_forward_network::FeedForwardNetwork,
-    swiglu_feed_forward_network::SwiGluFeedForwardNetwork,
+    matrix::Matrix, swiglu_feed_forward_network::SwiGluFeedForwardNetwork,
 };
 
-// src/feed_forward.rs
 pub trait FeedForward: Checkpointable {
+    /// 旧 API。 内部で `forward_matrix` を呼ぶ。 新規コードからは Matrix 版を直叩きすること。
     fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>>;
     fn backward(&mut self, dl_dy: &[Vec<f32>]) -> Vec<Vec<f32>>;
+    /// Matrix 直叩き API (Phase 7 高速化で導入)。
+    fn forward_matrix(&mut self, x: &Matrix) -> Matrix;
+    fn backward_matrix(&mut self, dl_dy: &Matrix) -> Matrix;
     fn zero_grad(&mut self);
     fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str);
 }

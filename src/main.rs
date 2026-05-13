@@ -35,7 +35,8 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
     adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
-    lr_scheduler::LrScheduler, multi_head_attention::MultiHeadAttention,
+    lr_scheduler::{LrScheduleKind, LrScheduler},
+    multi_head_attention::MultiHeadAttention,
     normalization::NormalizationKind, positional_encoding::PositionalEncodingKind,
     tokenizer::{
         Tokenizer, TokenizerKind, load_tokenizer_from_file, save_tokenizer_to_file,
@@ -140,6 +141,11 @@ struct Config {
     lr_min: f32,
     warmup_steps: usize,
     end_step: usize,
+    /// 学習率スケジュールの種類。 デフォルトは `WarmupCosine` (既存挙動互換)。
+    /// `WarmupStableDecay { stable_steps }` で WSD (warmup-stable-decay) に切替。
+    /// 同じ BPC を 15-30% 早く到達できる場合があり、 さらに total_steps を伸ばしても
+    /// 過去 step の lr 軌道が変わらないため checkpoint からの追加学習に向く。
+    lr_schedule_kind: LrScheduleKind,
     save_every: usize,
     log_every: usize,
     /// 0 のとき val を計測しない。 それ以外なら毎 `val_every` step で
@@ -194,6 +200,7 @@ impl Config {
             beta2: 0.999,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -231,6 +238,7 @@ impl Config {
             beta2: 0.99,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -275,6 +283,7 @@ impl Config {
             beta2: 0.99,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -316,6 +325,7 @@ impl Config {
             beta2: 0.99,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -360,6 +370,7 @@ impl Config {
             beta2: 0.99,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -422,6 +433,7 @@ impl Config {
             beta2: 0.99,
             prompts,
             merge_sample_chars: None,
+            lr_schedule_kind: LrScheduleKind::WarmupCosine,
         }
     }
 
@@ -492,7 +504,8 @@ impl Config {
 
     /// Phase 6-b: より大きな merge 数で sequence 圧縮を強める (vocab=16K)。
     /// 期待: 1 token ≈ 2.5 char、 実質 context ~1,280 char。
-    /// ただし vocab 増加分のパラメータ (~4M) と val_ppl の値域が変わる点に注意。
+    /// 実測 (起動時): chars/token=1.72 で +4% にとどまる。 BPE は ~3K merges で saturate するため
+    /// vocab を倍増しても token 数は -14% しか減らないと判明。 → Phase 6-c に振り替え。
     #[allow(dead_code)]
     fn aozora_meiji_taisho_charbpe16k_max512() -> Self {
         let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max512();
@@ -500,6 +513,34 @@ impl Config {
         cfg.vocab_size = 16000;
         // vocab=16000 だと merge 数 ~10,774。 サンプル拡大して品質を確保。
         cfg.merge_sample_chars = Some(1_000_000);
+        cfg
+    }
+
+    /// Phase 6-c: vocab=8K (Phase 6-a と同じトークナイザを再利用) で **max_len 512 → 1024** に拡張。
+    /// 期待: 実効コンテキスト 845 char → ~1,690 char (+100%, vocab 16K の +4% より遥かに大きい)。
+    /// attention は O(n²) で 4x、 FFN/embedding は 2x になるため、 batch_size を 32 → 16 に半減して
+    /// per-step 時間を Phase 6-a +30% (~13s) に抑える。 1 step あたりの token 数は不変 (16×1024 = 16,384)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_charbpe8k_max1024() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max512();
+        cfg.run_name = "phase6c_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024";
+        cfg.max_len = 1024;
+        cfg.batch_size = 16;
+        // tokenizer は Phase 6-a の 8K cache を再利用 (merge_sample_chars / vocab_size は変えない)
+        cfg
+    }
+
+    /// Phase 6-d: Phase 6-c と同じ形状で **WSD スケジューラ + Phase 7 高速化** を適用。
+    /// - WSD: warmup=300, stable=2160 (= 80% × (3000-300)), decay=540
+    ///   → 大半の step を lr_max で回し、 終盤 18% で 1-sqrt 減衰させる。
+    ///   nanoGPT/MiniCPM 流で同じ BPC を 15-30% 早く到達できる場合がある。
+    /// - Phase 7 高速化 (Matrix 直叩き + QKV 融合) で per-step ~1.2-1.4x 短縮を見込む。
+    /// 期待 total: ~6-7 h (Phase 6-c の ~9 h 比 -25 〜 -30%)。
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_charbpe8k_max1024_wsd() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024();
+        cfg.run_name = "phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd";
+        cfg.lr_schedule_kind = LrScheduleKind::WarmupStableDecay { stable_steps: 2160 };
         cfg
     }
 
@@ -531,18 +572,32 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 6-a: char-level BPE トークナイザ (vocab=8000) + Phase 5-4a と同じモデル (d=512, L=6)
-    // BPE 学習は 500K char サンプルで実施 (5.3 min)、 2 回目以降は cache から即ロード。
-    // 期待: 1 token あたり ~1.56 char、 実質 context ~800 char (Phase 5-4a の 512 char から +56%)、
-    //       BPC 4.18 (Phase 5-4a) より低下するかが評価の本質。
-    let cfg = Config::aozora_meiji_taisho_charbpe8k_max512();
-    // training_and_inference(&cfg);
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase6a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max512/best.bin",
-    );
+    // Phase 6-d: Phase 6-c と同じ形状 (d=512, n=6, max_len=1024, vocab=8K) に
+    //   **WSD scheduler + Phase 7 (Matrix 直叩き + QKV 融合) 高速化** を適用。
+    //   期待 total: ~6-7 h (Phase 6-c の ~9 h 比 -25 〜 -30%)、
+    //          BPC: Phase 6-c と同等以上 (WSD で同 step 内の収束効率が向上)。
+    let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd();
+    training_and_inference(&cfg);
 
-    // Phase 6-a tokenizer の cache 経由動作確認 (training 起動前にトークナイザだけ試したいとき):
+    // Phase 6-c: WarmupCosine 旧バイナリで起動して step 180 まで進めたが、
+    //   Phase 7 高速化が完了したので Phase 6-d に振り替え。
+    // let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024();
+    // training_and_inference(&cfg);
+
+    // Phase 6-b: char-level BPE (vocab=16000) — 起動したが圧縮率が +4% にとどまり、
+    //   vocab スケーリングの ROI が低いと判明したため Phase 6-c に振り替え (起動中の run は中断)。
+    // let cfg = Config::aozora_meiji_taisho_charbpe16k_max512();
+    // training_and_inference(&cfg);
+
+    // Phase 6-a: char-level BPE (vocab=8000) ✅ 完了
+    // best val_loss 4.2999 @ step 2400, val_ppl 73.70, BPC 3.76
+    // let cfg = Config::aozora_meiji_taisho_charbpe8k_max512();
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase6a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max512/best.bin",
+    // );
+
+    // tokenizer の cache 経由動作確認 (training 起動前にトークナイザだけ試したいとき):
     // bench_tokenizer_with_cache(&cfg);
 
     // let cfg = Config::aozora_meiji_taisho_d512_max512();
@@ -614,6 +669,7 @@ fn run_training_loop(
     rng: &mut SmallRng,
     token_ids: &[usize],
     val_ids: &[usize],
+    val_chars: usize,
     cfg: &Config,
     start_step: usize,
 ) {
@@ -621,7 +677,13 @@ fn run_training_loop(
     let mut ema_loss: Option<f32> = None;
     let mut window_min = f32::INFINITY;
     let mut window_max = f32::NEG_INFINITY;
-    let lr_scheduler = LrScheduler::new(cfg.lr_max, cfg.lr_min, cfg.warmup_steps, cfg.end_step);
+    let lr_scheduler = LrScheduler::with_kind(
+        cfg.lr_max,
+        cfg.lr_min,
+        cfg.warmup_steps,
+        cfg.end_step,
+        cfg.lr_schedule_kind,
+    );
 
     let ckpt_dir = cfg.checkpoint_dir();
     fs::create_dir_all(&ckpt_dir).unwrap();
@@ -654,23 +716,30 @@ fn run_training_loop(
         cfg.beta2,
     );
     println!(
-        "# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, batch_size={}, log_every={}, save_every={}, start_step={}",
+        "# lr_max={}, lr_min={}, warmup_steps={}, end_step={}, lr_schedule={:?}, batch_size={}, log_every={}, save_every={}, start_step={}",
         cfg.lr_max,
         cfg.lr_min,
         cfg.warmup_steps,
         cfg.end_step,
+        cfg.lr_schedule_kind,
         cfg.batch_size,
         cfg.log_every,
         cfg.save_every,
         start_step
     );
     println!(
-        "# corpus_tokens={}, chunk_len={}, max_offset={}, val_enabled={}, val_tokens={}, val_every={}, val_n_batches={}",
+        "# corpus_tokens={}, chunk_len={}, max_offset={}, val_enabled={}, val_tokens={}, val_chars={}, val_chars_per_token={:.4}, val_every={}, val_n_batches={}",
         token_ids.len(),
         chunk_len,
         max_offset,
         val_enabled,
         val_ids.len(),
+        val_chars,
+        if val_ids.is_empty() {
+            0.0
+        } else {
+            val_chars as f32 / val_ids.len() as f32
+        },
         cfg.val_every,
         cfg.val_n_batches,
     );
@@ -736,9 +805,16 @@ fn run_training_loop(
             let val_loss =
                 eval::compute_val_loss(model, val_ids, chunk_len, cfg.val_n_batches, VAL_SEED);
             let val_ppl = eval::perplexity(val_loss);
+            // BPC = bits per character. tokenizer 横断で公平比較できる正規化指標。
+            // val_loss は per-token の平均 nats なので、 tokens/chars 比で per-char に換算。
+            let bpc = if val_chars > 0 && !val_ids.is_empty() {
+                val_loss / std::f32::consts::LN_2 * (val_ids.len() as f32 / val_chars as f32)
+            } else {
+                f32::NAN
+            };
             println!(
-                "# val step={} val_loss={:.6} val_ppl={:.4}",
-                step, val_loss, val_ppl
+                "# val step={} val_loss={:.6} val_ppl={:.4} bpc={:.4}",
+                step, val_loss, val_ppl, bpc
             );
             let _ = std::io::stdout().flush();
 
@@ -754,8 +830,8 @@ fn run_training_loop(
                     .save_training_checkpoint(&best_path, opt, step)
                     .unwrap();
                 println!(
-                    "# best updated: step={} val_loss={:.6} val_ppl={:.4} (prev val_loss={}) -> saved {}",
-                    step, val_loss, val_ppl, prev_repr, best_path
+                    "# best updated: step={} val_loss={:.6} val_ppl={:.4} bpc={:.4} (prev val_loss={}) -> saved {}",
+                    step, val_loss, val_ppl, bpc, prev_repr, best_path
                 );
                 let _ = std::io::stdout().flush();
             }
@@ -794,10 +870,20 @@ fn training_and_inference(cfg: &Config) {
     } else {
         model.tokenize_corpus(&val_text)
     };
+    let val_chars = val_text.chars().count();
     let mut opt = AdamW::new_with_wd(cfg.lr_max, cfg.weight_decay);
     opt.set_beta2(cfg.beta2);
     let mut rng = SmallRng::seed_from_u64(42);
-    run_training_loop(&mut model, &mut opt, &mut rng, &token_ids, &val_ids, cfg, 1);
+    run_training_loop(
+        &mut model,
+        &mut opt,
+        &mut rng,
+        &token_ids,
+        &val_ids,
+        val_chars,
+        cfg,
+        1,
+    );
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
     infer(&mut model, &cfg.prompts);
@@ -814,6 +900,7 @@ fn training_from_checkpoint(cfg: &Config, path: &str) {
     } else {
         model.tokenize_corpus(&val_text)
     };
+    let val_chars = val_text.chars().count();
     let mut rng = SmallRng::seed_from_u64(42);
     // RNG を消費して整合させる（任意）: 各 step で batch_size 回 random_range を呼んでいたため
     let max_offset = token_ids.len() - cfg.max_len;
@@ -826,6 +913,7 @@ fn training_from_checkpoint(cfg: &Config, path: &str) {
         &mut rng,
         &token_ids,
         &val_ids,
+        val_chars,
         cfg,
         checkpoint_step + 1,
     );

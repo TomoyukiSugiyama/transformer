@@ -142,24 +142,35 @@ impl OutputHead {
         kept[0].0
     }
 
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
     /// (seq_len, d_model) → (seq_len, vocab_size)
-    pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        self.cache_hidden = Matrix::from_jagged(hidden);
+    pub fn forward_matrix(&mut self, hidden: &Matrix) -> Matrix {
+        self.cache_hidden = hidden.clone();
         // logits = hidden @ W   shape: (seq_len, vocab_size)
-        self.cache_hidden.matmul(&self.w).to_jagged()
+        self.cache_hidden.matmul(&self.w)
     }
 
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
     /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
-    /// grad_w を内部に累積する（apply_gradients で使用、バッチ末に zero_grad で初期化）
-    pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dl_dlogits_m = Matrix::from_jagged(dl_dlogits);
-
+    pub fn backward_matrix(&mut self, dl_dlogits: &Matrix) -> Matrix {
         // grad_w += cache_hidden^T @ dl_dlogits   shape: (d_model, vocab_size)
-        let g_w = self.cache_hidden.transpose().matmul(&dl_dlogits_m);
+        let g_w = self.cache_hidden.transpose().matmul(dl_dlogits);
         self.grad_w.add_in_place(&g_w);
 
         // dl_dhidden = dl_dlogits @ W^T   shape: (seq_len, d_model)
-        dl_dlogits_m.matmul(&self.w.transpose()).to_jagged()
+        dl_dlogits.matmul(&self.w.transpose())
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(&mut self, hidden: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(hidden);
+        self.forward_matrix(&xm).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dlogits: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dlogits);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     pub fn zero_grad(&mut self) {

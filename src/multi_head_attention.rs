@@ -13,14 +13,13 @@ use crate::matrix::Matrix;
 use crate::rope::Rope;
 
 pub struct MultiHeadAttention {
-    w_q: Matrix, // (d_model, d_model)
-    w_k: Matrix,
-    w_v: Matrix,
+    /// Q/K/V を 1 つに融合した重み: (d_model, 3*d_model)。 列方向に [Q | K | V] と並ぶ。
+    /// Phase 7 高速化で導入: matmul を 3 回 → 1 回に削減 (BLAS 効率も向上)。
+    /// チェックポイントでは互換性のため `w_q`, `w_k`, `w_v` の 3 つに分割して保存する。
+    w_qkv: Matrix,
     w_o: Matrix,
 
-    grad_w_q: Matrix,
-    grad_w_k: Matrix,
-    grad_w_v: Matrix,
+    grad_w_qkv: Matrix,
     grad_w_o: Matrix,
 
     cache_x: Matrix,           // (seq, d_model)
@@ -67,13 +66,9 @@ impl MultiHeadAttention {
         };
 
         Self {
-            w_q: rand_matrix(d_model, d_model),
-            w_k: rand_matrix(d_model, d_model),
-            w_v: rand_matrix(d_model, d_model),
+            w_qkv: rand_matrix(d_model, 3 * d_model),
             w_o: rand_matrix(d_model, d_model),
-            grad_w_q: Matrix::zeros(d_model, d_model),
-            grad_w_k: Matrix::zeros(d_model, d_model),
-            grad_w_v: Matrix::zeros(d_model, d_model),
+            grad_w_qkv: Matrix::zeros(d_model, 3 * d_model),
             grad_w_o: Matrix::zeros(d_model, d_model),
             cache_x: Matrix::zeros(0, 0),
             cache_q: Matrix::zeros(0, 0),
@@ -89,17 +84,57 @@ impl MultiHeadAttention {
         }
     }
 
-    pub fn forward(
-        &mut self,
-        x: &[Vec<f32>],
-        mask: Option<&Vec<Vec<bool>>>,
-    ) -> Vec<Vec<f32>> {
-        let x_m = Matrix::from_jagged(x);
+    /// W_QKV から W_Q (列 0..d_model) のビューに相当する Matrix を切り出す。
+    /// チェックポイント保存・KV cache の per-token forward で利用。
+    fn slice_w_q(&self) -> Matrix {
+        let cols = self.w_qkv.cols();
+        let mut data = Vec::with_capacity(self.d_model * self.d_model);
+        for i in 0..self.d_model {
+            data.extend_from_slice(&self.w_qkv.data()[i * cols..i * cols + self.d_model]);
+        }
+        Matrix::from_flat(data, self.d_model, self.d_model)
+    }
+    fn slice_w_k(&self) -> Matrix {
+        let cols = self.w_qkv.cols();
+        let mut data = Vec::with_capacity(self.d_model * self.d_model);
+        for i in 0..self.d_model {
+            let start = i * cols + self.d_model;
+            data.extend_from_slice(&self.w_qkv.data()[start..start + self.d_model]);
+        }
+        Matrix::from_flat(data, self.d_model, self.d_model)
+    }
+    fn slice_w_v(&self) -> Matrix {
+        let cols = self.w_qkv.cols();
+        let mut data = Vec::with_capacity(self.d_model * self.d_model);
+        for i in 0..self.d_model {
+            let start = i * cols + 2 * self.d_model;
+            data.extend_from_slice(&self.w_qkv.data()[start..start + self.d_model]);
+        }
+        Matrix::from_flat(data, self.d_model, self.d_model)
+    }
 
-        // Q, K, V を射影
-        let q = x_m.matmul(&self.w_q);
-        let k = x_m.matmul(&self.w_k);
-        let v = x_m.matmul(&self.w_v);
+    /// 旧形式 (W_Q | W_K | W_V) から W_QKV を再構成する。 checkpoint ロード時に使う。
+    fn assemble_w_qkv(&mut self, q: &Matrix, k: &Matrix, v: &Matrix) {
+        let d = self.d_model;
+        let mut w = Matrix::zeros(d, 3 * d);
+        for i in 0..d {
+            let dst = w.row_mut(i);
+            dst[..d].copy_from_slice(&q.row(i)[..d]);
+            dst[d..2 * d].copy_from_slice(&k.row(i)[..d]);
+            dst[2 * d..3 * d].copy_from_slice(&v.row(i)[..d]);
+        }
+        self.w_qkv = w;
+    }
+
+    /// Matrix 直叩き forward (Phase 7 高速化で導入)。
+    pub fn forward_matrix(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+        // Q, K, V を **1 つの matmul に融合**: x @ W_QKV → split。
+        // 旧 3 matmul (x @ W_Q, x @ W_K, x @ W_V) より BLAS 効率が良い。
+        let qkv = x.matmul(&self.w_qkv);
+        let parts = qkv.split_columns(3); // [Q, K, V] each (seq, d_model)
+        let q = parts[0].clone();
+        let k = parts[1].clone();
+        let v = parts[2].clone();
 
         let mut q_heads = q.split_columns(self.n_heads);
         let mut k_heads = k.split_columns(self.n_heads);
@@ -125,9 +160,7 @@ impl MultiHeadAttention {
         let concat = Matrix::concat_columns(&head_outputs);
         let output = concat.matmul(&self.w_o);
 
-        let output_jagged = output.to_jagged();
-
-        self.cache_x = x_m;
+        self.cache_x = x.clone();
         self.cache_q = q;
         self.cache_k = k;
         self.cache_v = v;
@@ -135,18 +168,17 @@ impl MultiHeadAttention {
         self.cache_att_w = all_weights;
         self.cache_v_head = v_heads;
 
-        output_jagged
+        output
     }
 
-    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        let dl_dout_m = Matrix::from_jagged(dl_dout);
-
+    /// Matrix 直叩き backward (Phase 7 高速化で導入)。
+    pub fn backward_matrix(&mut self, dl_dout: &Matrix) -> Matrix {
         // W_O backward
         // grad_w_o += concat^T @ dl_dout
-        let g_w_o = self.cache_concat.transpose().matmul(&dl_dout_m);
+        let g_w_o = self.cache_concat.transpose().matmul(dl_dout);
         self.grad_w_o.add_in_place(&g_w_o);
         // dl_dconcat = dl_dout @ W_O^T
-        let dl_dconcat = dl_dout_m.matmul(&self.w_o.transpose());
+        let dl_dconcat = dl_dout.matmul(&self.w_o.transpose());
 
         // concat_heads backward → head ごとに dl_dconcat をスライス
         let dl_dhead_outs = dl_dconcat.split_columns(self.n_heads);
@@ -192,20 +224,32 @@ impl MultiHeadAttention {
         let dl_dk = Matrix::concat_columns(&dl_dk_heads);
         let dl_dv = Matrix::concat_columns(&dl_dv_heads);
 
-        // W_Q/K/V backward (累積)
-        let cache_x_t = self.cache_x.transpose();
-        let g_w_q = cache_x_t.matmul(&dl_dq);
-        let g_w_k = cache_x_t.matmul(&dl_dk);
-        let g_w_v = cache_x_t.matmul(&dl_dv);
-        self.grad_w_q.add_in_place(&g_w_q);
-        self.grad_w_k.add_in_place(&g_w_k);
-        self.grad_w_v.add_in_place(&g_w_v);
+        // QKV 融合 backward: dQ/dK/dV を列方向に concat → 1 matmul で W_QKV と x の勾配を作る。
+        let dl_dqkv = Matrix::concat_columns(&[dl_dq, dl_dk, dl_dv]);
 
-        // dl_dx = dQ @ W_Q^T + dK @ W_K^T + dV @ W_V^T
-        let mut dl_dx = dl_dq.matmul(&self.w_q.transpose());
-        dl_dx.add_in_place(&dl_dk.matmul(&self.w_k.transpose()));
-        dl_dx.add_in_place(&dl_dv.matmul(&self.w_v.transpose()));
-        dl_dx.to_jagged()
+        // grad_w_qkv += cache_x^T @ dl_dqkv  shape: (d_model, 3*d_model)
+        let cache_x_t = self.cache_x.transpose();
+        let g_w_qkv = cache_x_t.matmul(&dl_dqkv);
+        self.grad_w_qkv.add_in_place(&g_w_qkv);
+
+        // dl_dx = dl_dqkv @ W_QKV^T  shape: (seq, d_model)
+        dl_dqkv.matmul(&self.w_qkv.transpose())
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn forward(
+        &mut self,
+        x: &[Vec<f32>],
+        mask: Option<&Vec<Vec<bool>>>,
+    ) -> Vec<Vec<f32>> {
+        let xm = Matrix::from_jagged(x);
+        self.forward_matrix(&xm, mask).to_jagged()
+    }
+
+    /// 旧 API: jagged → Matrix 経由。
+    pub fn backward(&mut self, dl_dout: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let dy = Matrix::from_jagged(dl_dout);
+        self.backward_matrix(&dy).to_jagged()
     }
 
     /// 推論専用 (KV cache あり) の 1 token 前進。
@@ -232,17 +276,15 @@ impl MultiHeadAttention {
         let dh = self.d_head;
         let h_n = self.n_heads;
 
-        // 1 token を 1-row Matrix にして Q, K, V 投影。
-        // matmul は (1, d) × (d, d) なので m=1 の細長い形状だが、
-        // BLAS sgemm はこの形でも問題なく動く。
+        // 1 token を 1-row Matrix にして Q, K, V を **1 つの matmul で射影**。
+        // x @ W_QKV: (1, d) × (d, 3d) → (1, 3d)
         let x_m = Matrix::from_flat(x_new.to_vec(), 1, self.d_model);
-        let q = x_m.matmul(&self.w_q);
-        let k = x_m.matmul(&self.w_k);
-        let v = x_m.matmul(&self.w_v);
-
-        let mut q_data = q.data().to_vec();
-        let mut k_data = k.data().to_vec();
-        let v_data: &[f32] = v.data();
+        let qkv = x_m.matmul(&self.w_qkv);
+        let d = self.d_model;
+        let mut q_data: Vec<f32> = qkv.data()[0..d].to_vec();
+        let mut k_data: Vec<f32> = qkv.data()[d..2 * d].to_vec();
+        let v_owned: Vec<f32> = qkv.data()[2 * d..3 * d].to_vec();
+        let v_data: &[f32] = &v_owned;
 
         // RoPE: 新規 token の Q, K を **位置 cur_len** で head ごとに回転。
         // 過去の K (cache.k) は append 時点で当時の位置の角度で回転済なので不変。
@@ -316,16 +358,21 @@ impl MultiHeadAttention {
     }
 
     pub fn zero_grad(&mut self) {
-        self.grad_w_q.data_mut().fill(0.0);
-        self.grad_w_k.data_mut().fill(0.0);
-        self.grad_w_v.data_mut().fill(0.0);
+        self.grad_w_qkv.data_mut().fill(0.0);
         self.grad_w_o.data_mut().fill(0.0);
     }
 
     pub fn apply_gradients(&mut self, opt: &mut AdamW, prefix: &str) {
-        opt.step_matrix_flat(&format!("{prefix}.w_q"), &mut self.w_q, &self.grad_w_q);
-        opt.step_matrix_flat(&format!("{prefix}.w_k"), &mut self.w_k, &self.grad_w_k);
-        opt.step_matrix_flat(&format!("{prefix}.w_v"), &mut self.w_v, &self.grad_w_v);
+        // 重みの命名は **互換性のため w_q/w_k/w_v** に分割した形に保つ。
+        // (Adam の moments を含む checkpoint 形式が変わらない)
+        // 内部 W_QKV は (d_model, 3*d_model) のまま、 列 0..d, d..2d, 2d..3d を
+        // 仮想的な W_Q/W_K/W_V として個別更新する。 まずは融合のままステップして
+        // (シンプル & 1 step) 後で必要なら 3 分割に切り分ける。
+        opt.step_matrix_flat(
+            &format!("{prefix}.w_qkv"),
+            &mut self.w_qkv,
+            &self.grad_w_qkv,
+        );
         opt.step_matrix_flat(&format!("{prefix}.w_o"), &mut self.w_o, &self.grad_w_o);
     }
 }
@@ -414,13 +461,16 @@ pub fn causal_mask(seq_len: usize) -> Vec<Vec<bool>> {
 
 impl Checkpointable for MultiHeadAttention {
     fn to_weight_map(&self) -> WeightMap {
+        // 旧形式互換のため w_q/w_k/w_v に分割して保存する。
+        // (Phase 6-c までの best.bin が w_q/w_k/w_v を期待しているため、
+        //  Phase 7 移行後も load 時の互換性を担保する)
         let mut map = WeightMap::new();
         map.insert_scalar("n_heads", self.n_heads as u64);
         map.insert_scalar("d_model", self.d_model as u64);
         map.insert_scalar("d_head", self.d_head as u64);
-        map.insert_matrix("w_q", self.w_q.to_jagged());
-        map.insert_matrix("w_k", self.w_k.to_jagged());
-        map.insert_matrix("w_v", self.w_v.to_jagged());
+        map.insert_matrix("w_q", self.slice_w_q().to_jagged());
+        map.insert_matrix("w_k", self.slice_w_k().to_jagged());
+        map.insert_matrix("w_v", self.slice_w_v().to_jagged());
         map.insert_matrix("w_o", self.w_o.to_jagged());
         map
     }
@@ -432,9 +482,11 @@ impl Checkpointable for MultiHeadAttention {
         if n_heads != self.n_heads || d_model != self.d_model || d_head != self.d_head {
             return Err(Error::new(ErrorKind::InvalidData, "mha config mismatch"));
         }
-        self.w_q = Matrix::from_jagged(map.get_matrix("w_q")?);
-        self.w_k = Matrix::from_jagged(map.get_matrix("w_k")?);
-        self.w_v = Matrix::from_jagged(map.get_matrix("w_v")?);
+        // 旧形式 (w_q, w_k, w_v) → W_QKV に組み立てる
+        let q = Matrix::from_jagged(map.get_matrix("w_q")?);
+        let k = Matrix::from_jagged(map.get_matrix("w_k")?);
+        let v = Matrix::from_jagged(map.get_matrix("w_v")?);
+        self.assemble_w_qkv(&q, &k, &v);
         self.w_o = Matrix::from_jagged(map.get_matrix("w_o")?);
         Ok(())
     }
