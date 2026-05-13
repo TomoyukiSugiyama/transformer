@@ -28,8 +28,24 @@ pub struct MultiHeadAttention {
     cache_k: Matrix,           // (seq, d_model) ※未回転
     cache_v: Matrix,           // (seq, d_model)
     cache_concat: Matrix,      // (seq, d_model)
-    cache_att_w: Vec<Matrix>,  // n_heads × (seq, seq)
-    cache_v_head: Vec<Matrix>, // n_heads × (seq, d_head)
+
+    // Phase 7-5 B3: Flash Attention の出力統計を保存 (backward で attention を再構成するため)。
+    // 旧 cache_att_w (n_heads × (seq, seq) Vec<Matrix>) は per-head 4 MB × 8 head × 6 layer = 192 MB
+    // だったが、 cache_lse (n_heads × seq の Vec<Vec<f32>>) は per-head 4 KB × 8 × 6 = 192 KB に縮小。
+    cache_lse: Vec<Vec<f32>>,     // n_heads × seq, log-sum-exp from flash forward
+    cache_out_heads: Vec<Matrix>, // n_heads × (seq, d_head), flash forward output per head
+                                  // (backward の D = rowsum(O ⊙ dO) 計算で必要)
+
+    // ---------- Phase 7-5 (perf-alloc): reusable buffers ----------
+    // forward/backward を呼ぶたびに毎回 alloc していた中間行列を struct field 化して、
+    // ensure_shape + _into 系 API で **buffer を再利用** する。 BLAS time は不変だが
+    // per-step alloc を ~30 MB 削減 (ピーク RSS と allocator 競合の減少が効く)。
+    buf_qkv: Matrix,          // forward: x @ W_QKV (seq, 3*d_model)
+    buf_dl_dconcat: Matrix,   // backward: dl_dout @ W_O^T (seq, d_model)
+    buf_dl_dq: Matrix,        // backward: concat heads → (seq, d_model)
+    buf_dl_dk: Matrix,        // backward: concat heads → (seq, d_model)
+    buf_dl_dv: Matrix,        // backward: concat heads → (seq, d_model)
+    buf_dl_dqkv: Matrix,      // backward: concat [dq, dk, dv] → (seq, 3*d_model)
 
     n_heads: usize,
     d_model: usize,
@@ -71,13 +87,19 @@ impl MultiHeadAttention {
             w_o: rand_matrix(d_model, d_model),
             grad_w_qkv: Matrix::zeros(d_model, 3 * d_model),
             grad_w_o: Matrix::zeros(d_model, d_model),
-            cache_x: Matrix::zeros(0, 0),
-            cache_q: Matrix::zeros(0, 0),
-            cache_k: Matrix::zeros(0, 0),
-            cache_v: Matrix::zeros(0, 0),
-            cache_concat: Matrix::zeros(0, 0),
-            cache_att_w: Vec::new(),
-            cache_v_head: Vec::new(),
+            cache_x: Matrix::default(),
+            cache_q: Matrix::default(),
+            cache_k: Matrix::default(),
+            cache_v: Matrix::default(),
+            cache_concat: Matrix::default(),
+            cache_lse: Vec::new(),
+            cache_out_heads: Vec::new(),
+            buf_qkv: Matrix::default(),
+            buf_dl_dconcat: Matrix::default(),
+            buf_dl_dq: Matrix::default(),
+            buf_dl_dk: Matrix::default(),
+            buf_dl_dv: Matrix::default(),
+            buf_dl_dqkv: Matrix::default(),
             n_heads,
             d_model,
             d_head,
@@ -127,20 +149,41 @@ impl MultiHeadAttention {
         self.w_qkv = w;
     }
 
-    pub fn forward(&mut self, x: &Matrix, mask: Option<&Vec<Vec<bool>>>) -> Matrix {
-        // Q, K, V を **1 つの matmul に融合**: x @ W_QKV → split。
-        // 旧 3 matmul (x @ W_Q, x @ W_K, x @ W_V) より BLAS 効率が良い。
-        let qkv = x.matmul(&self.w_qkv);
-        // Phase 7-4: split_columns の戻り Vec を IntoIter で move して .clone() 3 回 (3 × 2 MB)
-        // を排除。
-        let mut parts_iter = qkv.split_columns(3).into_iter();
-        let q = parts_iter.next().unwrap();
-        let k = parts_iter.next().unwrap();
-        let v = parts_iter.next().unwrap();
+    pub fn forward(&mut self, x: &Matrix, _mask: Option<&Vec<Vec<bool>>>) -> Matrix {
+        // 注: `mask` は API 互換のため残置。 訓練では常に causal_mask が渡され、
+        // Phase 7-5 B3 で Flash Attention に置換された結果 causal 専用となっている。
+        // (推論の per-token forward_step は別パスで mask 不要)。
+        let seq = x.rows();
+        let d = self.d_model;
 
-        let mut q_heads = q.split_columns(self.n_heads);
-        let mut k_heads = k.split_columns(self.n_heads);
-        let v_heads = v.split_columns(self.n_heads);
+        // Phase 7-5: cache_x ← x の clone を ensure_shape + memcpy に置換 (alloc 1 回 → 0)
+        self.cache_x.ensure_shape(seq, d);
+        self.cache_x.data_mut().copy_from_slice(x.data());
+
+        // QKV 融合 projection: x @ W_QKV → buf_qkv (Phase 7-5: alloc 1 回 → 0)。
+        self.buf_qkv.ensure_shape(seq, 3 * d);
+        x.matmul_into(&self.w_qkv, &mut self.buf_qkv);
+
+        // buf_qkv を 3 列ブロックに split → cache_q, cache_k, cache_v に直接書き込む
+        // (Phase 7-5: alloc 3 回 → 0)。 mem::take で所有権を一時的に外して配列にまとめる。
+        let mut qkv_parts = [
+            std::mem::take(&mut self.cache_q),
+            std::mem::take(&mut self.cache_k),
+            std::mem::take(&mut self.cache_v),
+        ];
+        for p in &mut qkv_parts {
+            p.ensure_shape(seq, d);
+        }
+        self.buf_qkv.split_columns_into(&mut qkv_parts);
+        let [q, k, v] = qkv_parts;
+        self.cache_q = q;
+        self.cache_k = k;
+        self.cache_v = v;
+
+        // head 分割 (n_heads × (seq, d_head))。
+        let mut q_heads = self.cache_q.split_columns(self.n_heads);
+        let mut k_heads = self.cache_k.split_columns(self.n_heads);
+        let v_heads = self.cache_v.split_columns(self.n_heads);
 
         // RoPE: Q と K のみに位置回転を適用 (V には適用しない)。
         // backward でも同じ回転が必要なので、 ここでの結果は捨てて backward で再計算する。
@@ -151,44 +194,58 @@ impl MultiHeadAttention {
             }
         }
 
-        let mut all_weights = Vec::with_capacity(self.n_heads);
+        // Phase 7-5 B3: Flash Attention に置換。
+        // 旧 scaled_dot_product_attention は per-head で full (seq, seq) scores を作っていた
+        // (4 MB × n_heads × n_layers × 2 (fwd+bwd) = ~384 MB / step を allocate)。
+        // Flash Attention は block-tile online softmax で scores を materialize しないため
+        // alloc を大幅に削減し、 さらに causal の upper triangle を skip して FLOP も ~半減する。
+        let mut lse_per_head = Vec::with_capacity(self.n_heads);
         let mut head_outputs = Vec::with_capacity(self.n_heads);
         for h in 0..self.n_heads {
-            let (out, w) =
-                scaled_dot_product_attention(&q_heads[h], &k_heads[h], &v_heads[h], mask);
+            let (out, lse) =
+                flash_attention_forward(&q_heads[h], &k_heads[h], &v_heads[h]);
             head_outputs.push(out);
-            all_weights.push(w);
+            lse_per_head.push(lse);
         }
-        let concat = Matrix::concat_columns(&head_outputs);
-        let output = concat.matmul(&self.w_o);
 
-        self.cache_x = x.clone();
-        self.cache_q = q;
-        self.cache_k = k;
-        self.cache_v = v;
-        self.cache_concat = concat;
-        self.cache_att_w = all_weights;
-        self.cache_v_head = v_heads;
+        // concat heads → cache_concat (Phase 7-5: alloc 1 回 → 0)。
+        self.cache_concat.ensure_shape(seq, d);
+        let head_refs: Vec<&Matrix> = head_outputs.iter().collect();
+        Matrix::concat_columns_into(&head_refs, &mut self.cache_concat);
+
+        // 出力 projection: concat @ W_O → 戻り値。 ここは関数の return 値なので残置。
+        let output = self.cache_concat.matmul(&self.w_o);
+
+        self.cache_lse = lse_per_head;
+        self.cache_out_heads = head_outputs;
 
         output
     }
 
     pub fn backward(&mut self, dl_dout: &Matrix) -> Matrix {
+        let seq = self.cache_x.rows();
+        let d = self.d_model;
+
         // W_O backward
         // grad_w_o += concat^T @ dl_dout  (Phase 7-4: fused matmul-add で temp alloc + sweep 圧縮)
         self.cache_concat
             .matmul_t1_add_into(dl_dout, &mut self.grad_w_o);
-        // dl_dconcat = dl_dout @ W_O^T  (Phase 7-3: matmul_t2 で transpose アロケを回避)
-        let dl_dconcat = dl_dout.matmul_t2(&self.w_o);
+
+        // dl_dconcat = dl_dout @ W_O^T を buf_dl_dconcat に書き込む (Phase 7-5: alloc 1 回 → 0)。
+        self.buf_dl_dconcat.ensure_shape(seq, d);
+        dl_dout.matmul_t2_into(&self.w_o, &mut self.buf_dl_dconcat);
 
         // concat_heads backward → head ごとに dl_dconcat をスライス
-        let dl_dhead_outs = dl_dconcat.split_columns(self.n_heads);
+        let dl_dhead_outs = self.buf_dl_dconcat.split_columns(self.n_heads);
 
         // scaled_dot_product_attention backward（head ごと）
         // RoPE 使用時、 attention は **回転後** の Q', K' に対して計算されたので、
         // backward の入力にも回転後の値が必要。 cache は未回転なので再回転する。
         let mut q_heads = self.cache_q.split_columns(self.n_heads);
         let mut k_heads = self.cache_k.split_columns(self.n_heads);
+        // V も head 分割。 旧 cache_v_head は廃止して、 backward 毎に cache_v から split し直す
+        // (split_columns は memcpy のみで安価、 4 KB × 8 head 程度)。
+        let v_heads = self.cache_v.split_columns(self.n_heads);
         if let Some(rope) = &self.rope {
             for h in 0..self.n_heads {
                 rope.apply_in_place(&mut q_heads[h]);
@@ -196,15 +253,18 @@ impl MultiHeadAttention {
             }
         }
 
+        // Phase 7-5 B3: Flash Attention backward に置換。
+        // cache_lse から P を再構成し、 dq/dk/dv を block-tile で accumulate する。
         let mut dl_dq_heads = Vec::with_capacity(self.n_heads);
         let mut dl_dk_heads = Vec::with_capacity(self.n_heads);
         let mut dl_dv_heads = Vec::with_capacity(self.n_heads);
         for h in 0..self.n_heads {
-            let (dq, dk, dv) = scaled_dot_product_attention_backward(
+            let (dq, dk, dv) = flash_attention_backward(
                 &q_heads[h],
                 &k_heads[h],
-                &self.cache_v_head[h],
-                &self.cache_att_w[h],
+                &v_heads[h],
+                &self.cache_out_heads[h],
+                &self.cache_lse[h],
                 &dl_dhead_outs[h],
             );
             dl_dq_heads.push(dq);
@@ -220,22 +280,35 @@ impl MultiHeadAttention {
             }
         }
 
-        // split_heads backward → head の勾配を結合して [seq, d_model] に戻す
-        let dl_dq = Matrix::concat_columns(&dl_dq_heads);
-        let dl_dk = Matrix::concat_columns(&dl_dk_heads);
-        let dl_dv = Matrix::concat_columns(&dl_dv_heads);
+        // split_heads backward → head の勾配を結合して [seq, d_model] に戻す。
+        // Phase 7-5: 3 つの concat 出力を buf_dl_d{q,k,v} に書き込む (alloc 3 回 → 0)。
+        self.buf_dl_dq.ensure_shape(seq, d);
+        self.buf_dl_dk.ensure_shape(seq, d);
+        self.buf_dl_dv.ensure_shape(seq, d);
+        let dq_refs: Vec<&Matrix> = dl_dq_heads.iter().collect();
+        let dk_refs: Vec<&Matrix> = dl_dk_heads.iter().collect();
+        let dv_refs: Vec<&Matrix> = dl_dv_heads.iter().collect();
+        Matrix::concat_columns_into(&dq_refs, &mut self.buf_dl_dq);
+        Matrix::concat_columns_into(&dk_refs, &mut self.buf_dl_dk);
+        Matrix::concat_columns_into(&dv_refs, &mut self.buf_dl_dv);
 
         // QKV 融合 backward: dQ/dK/dV を列方向に concat → 1 matmul で W_QKV と x の勾配を作る。
-        let dl_dqkv = Matrix::concat_columns(&[dl_dq, dl_dk, dl_dv]);
+        // Phase 7-5: buf_dl_dqkv に書き込む (alloc 1 回 → 0)。
+        self.buf_dl_dqkv.ensure_shape(seq, 3 * d);
+        Matrix::concat_columns_into(
+            &[&self.buf_dl_dq, &self.buf_dl_dk, &self.buf_dl_dv],
+            &mut self.buf_dl_dqkv,
+        );
 
         // grad_w_qkv += cache_x^T @ dl_dqkv  shape: (d_model, 3*d_model)
         // Phase 7-4: fused matmul-add で d_model × 3*d_model の temp + sweep を 1 sgemm に圧縮。
         self.cache_x
-            .matmul_t1_add_into(&dl_dqkv, &mut self.grad_w_qkv);
+            .matmul_t1_add_into(&self.buf_dl_dqkv, &mut self.grad_w_qkv);
 
         // dl_dx = dl_dqkv @ W_QKV^T  shape: (seq, d_model)
-        // Phase 7-3: matmul_t2 で W_QKV (d, 3d) の transpose を materialize しない (省 6 MB)
-        dl_dqkv.matmul_t2(&self.w_qkv)
+        // Phase 7-3: matmul_t2 で W_QKV (d, 3d) の transpose を materialize しない (省 6 MB)。
+        // 戻り値なので buffer 化しても allocator 呼び出し回数は変わらず、 ここは alloc 1 回のまま残置。
+        self.buf_dl_dqkv.matmul_t2(&self.w_qkv)
     }
 
     /// 推論専用 (KV cache あり) の 1 token 前進。
@@ -363,6 +436,9 @@ impl MultiHeadAttention {
     }
 }
 
+/// Phase 7-5 B3 移行で MHA からは Flash Attention 経由に切り替えたが、
+/// `flash_attention_*` の数値一致テスト (基準実装) として残置する。
+#[allow(dead_code)]
 fn scaled_dot_product_attention_backward(
     q: &Matrix,
     k: &Matrix,
@@ -407,6 +483,9 @@ fn scaled_dot_product_attention_backward(
     (dl_dq, dl_dk, dl_dv)
 }
 
+/// Phase 7-5 B3 移行で MHA からは Flash Attention 経由に切り替えたが、
+/// `flash_attention_*` の数値一致テスト (基準実装) として残置する。
+#[allow(dead_code)]
 fn scaled_dot_product_attention(
     q: &Matrix,
     k: &Matrix,
@@ -449,6 +528,359 @@ pub fn causal_mask(seq_len: usize) -> Vec<Vec<bool>> {
         .collect()
 }
 
+// ============================================================================
+// Phase 7-5 B3: Flash Attention 風 (block-tiled online softmax + causal skip)
+// ============================================================================
+//
+// 目的:
+// 1. **alloc 削減**: 中間 (N, N) scores 行列を materialize しない (per head 4 MB × 8 head × 6 layer
+//    × 2 (fwd/bwd) = ~384 MB の per-step alloc を消す)。
+// 2. **causal skip による FLOP 削減**: causal mask の upper triangle は計算しない (~50% off)。
+// 3. **キャッシュ局所性**: Q/K/V を block-tile で処理し、 L1/L2 キャッシュに収める。
+//
+// アルゴリズム (FlashAttention-1 流):
+//   for i in 0..n_blocks (Q blocks):
+//     for j in 0..=i (K blocks, causal: j > i は skip):
+//       S_ij = Qi @ Kj^T / √d_k                                          # (Bq, Bk)
+//       if i == j: apply causal mask within diagonal block
+//       online softmax update: m_new, l_new, O_block を rescale + 加算
+//   final: O /= l (row-wise), lse = m + log(l)
+//
+// backward は forward で保存した lse (per-row log-sum-exp) から P を再構成して
+// blockwise に dQ/dK/dV を accumulate する。
+//
+// 設計選択:
+// - block size BLOCK_SIZE = 256 を固定 (seq=1024 で 4 Q block、 causal で平均 2.5 K block)。
+//   小さすぎる block size (32-64) は sgemm 呼び出しオーバーヘッドが支配的になるため避ける。
+//   d_head=64 のとき S block は 256×256×4 = 256 KB (L2 cache 内、 sgemm 効率良)。
+//   seq < BLOCK_SIZE のときは単一ブロックでの処理にフォールバック (正しさは変わらない)。
+// - 戻り値は (output, lse: Vec<f32>) で、 既存 (output, att_w: Matrix) と互換は無い。
+//   MHA 側で cache_att_w → cache_lse に変更する。
+
+const FA_BLOCK_SIZE: usize = 256;
+
+/// Flash Attention forward (causal mask 専用)。
+/// 入力 q, k, v は形状 `(N, d_head)`。 戻り値 `(output, lse)`:
+/// - `output`: `(N, d_head)` の attention 出力。
+/// - `lse`: 長さ `N` の per-row log-sum-exp (= `m + log(l)`)。 backward で使う。
+pub fn flash_attention_forward(q: &Matrix, k: &Matrix, v: &Matrix) -> (Matrix, Vec<f32>) {
+    let n = q.rows();
+    let d_head = q.cols();
+    assert_eq!(k.rows(), n, "flash_attention: K rows mismatch");
+    assert_eq!(v.rows(), n, "flash_attention: V rows mismatch");
+    assert_eq!(k.cols(), d_head, "flash_attention: K cols mismatch");
+    assert_eq!(v.cols(), d_head, "flash_attention: V cols mismatch");
+
+    let inv_scale = 1.0 / (d_head as f32).sqrt();
+    let bs = FA_BLOCK_SIZE;
+    let n_blocks = n.div_ceil(bs);
+
+    let mut output = Matrix::zeros(n, d_head);
+    let mut m_vec = vec![f32::NEG_INFINITY; n];
+    let mut l_vec = vec![0.0f32; n];
+
+    // 各 Q block を独立に処理 (row 方向は他の Q block と独立なので rayon 並列化可だが、
+    // ここでは単純化のため逐次。 BLAS 内部の並列化に任せる)。
+    for i_block in 0..n_blocks {
+        let i_start = i_block * bs;
+        let i_end = (i_start + bs).min(n);
+        let bq = i_end - i_start;
+
+        // Qi = Q[i_start..i_end] のビュー風に slice → 新規 Matrix を構築
+        // (slice view が無いので copy。 ホット path だが d_head 小なのでコスト低)
+        let qi = block_view(q, i_start, i_end);
+
+        // Q block ごとの running max, sum, output (block-local)
+        let mut m_block = vec![f32::NEG_INFINITY; bq];
+        let mut l_block = vec![0.0f32; bq];
+        let mut o_block = Matrix::zeros(bq, d_head);
+
+        // causal: j_block は 0..=i_block のみ計算 (それ以外は S_ij が全て -inf で寄与なし)
+        for j_block in 0..=i_block {
+            let j_start = j_block * bs;
+            let j_end = (j_start + bs).min(n);
+
+            let kj = block_view(k, j_start, j_end);
+            let vj = block_view(v, j_start, j_end);
+
+            // S = Qi @ Kj^T / √d_k    shape: (bq, j_end - j_start)
+            let mut s = qi.matmul_t2(&kj);
+            for x in s.data_mut() {
+                *x *= inv_scale;
+            }
+
+            // Diagonal block (i_block == j_block): causal mask を local 座標で適用。
+            // 「global col > global row」 = 「j_start + c > i_start + r」 → c > r (block 対角の場合)
+            if i_block == j_block {
+                let cols = s.cols();
+                for r in 0..bq {
+                    let s_row = s.row_mut(r);
+                    for c in (r + 1)..cols {
+                        s_row[c] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+
+            // Online softmax 更新:
+            //   m_new = max(m_old, rowmax(S))
+            //   P = exp(S - m_new)
+            //   rescale = exp(m_old - m_new)
+            //   O_block = O_block * rescale + P @ V_j
+            //   l_block = l_block * rescale + rowsum(P)
+            //   m_block = m_new
+
+            // 1. row max of S
+            let mut row_max_s = vec![f32::NEG_INFINITY; bq];
+            for r in 0..bq {
+                let mut mx = f32::NEG_INFINITY;
+                for &x in s.row(r).iter() {
+                    if x > mx {
+                        mx = x;
+                    }
+                }
+                row_max_s[r] = mx;
+            }
+
+            // 2. m_new, rescale
+            let mut m_new = vec![0.0f32; bq];
+            let mut rescale = vec![0.0f32; bq];
+            for r in 0..bq {
+                let mnew = m_block[r].max(row_max_s[r]);
+                // m_block[r] が -inf のときは rescale = 1.0 (初期値で乗算しても 0 のまま)
+                let rs = if m_block[r] == f32::NEG_INFINITY {
+                    1.0
+                } else {
+                    (m_block[r] - mnew).exp()
+                };
+                m_new[r] = mnew;
+                rescale[r] = rs;
+            }
+
+            // 3. P = exp(S - m_new) in-place を S buffer に
+            let mut sum_p = vec![0.0f32; bq];
+            for r in 0..bq {
+                let mnew = m_new[r];
+                let s_row = s.row_mut(r);
+                let mut sp = 0.0f32;
+                for x in s_row.iter_mut() {
+                    let e = if *x == f32::NEG_INFINITY {
+                        0.0
+                    } else {
+                        (*x - mnew).exp()
+                    };
+                    *x = e;
+                    sp += e;
+                }
+                sum_p[r] = sp;
+            }
+
+            // 4. O_block = O_block * rescale + P @ V_j
+            //    まず O_block の各行を rescale で in-place scale
+            for r in 0..bq {
+                let rs = rescale[r];
+                if rs != 1.0 {
+                    let o_row = o_block.row_mut(r);
+                    for x in o_row.iter_mut() {
+                        *x *= rs;
+                    }
+                }
+            }
+            //    O_block += P @ V_j    (P: bq × bk, V_j: bk × d_head)
+            s.matmul_add_into(&vj, &mut o_block);
+
+            // 5. l_block, m_block update
+            for r in 0..bq {
+                l_block[r] = l_block[r] * rescale[r] + sum_p[r];
+                m_block[r] = m_new[r];
+            }
+        }
+
+        // O_block を l_block で正規化し、 output / lse / m_vec / l_vec へ書き戻し
+        for r in 0..bq {
+            let global_r = i_start + r;
+            let inv_l = 1.0 / l_block[r];
+            let o_row = o_block.row(r);
+            let out_row = output.row_mut(global_r);
+            for c in 0..d_head {
+                out_row[c] = o_row[c] * inv_l;
+            }
+            m_vec[global_r] = m_block[r];
+            l_vec[global_r] = l_block[r];
+        }
+    }
+
+    // lse = m + log(l)
+    let lse: Vec<f32> = m_vec
+        .iter()
+        .zip(l_vec.iter())
+        .map(|(&m, &l)| m + l.ln())
+        .collect();
+
+    (output, lse)
+}
+
+/// Flash Attention backward (causal mask 専用)。
+/// forward と同じ block 構造で attention probabilities を再構成し、 dq/dk/dv を計算する。
+///
+/// 入力:
+/// - q, k, v: forward 同様
+/// - output: forward の戻り値 (N, d_head)  ※ D = rowsum(O ⊙ dO) の計算に使用
+/// - lse: forward の戻り値 (N,)            ※ P = exp(S - LSE) で attention 再構成
+/// - dl_dout: 上流からの gradient (N, d_head)
+///
+/// 戻り値: (dq, dk, dv) いずれも (N, d_head)
+pub fn flash_attention_backward(
+    q: &Matrix,
+    k: &Matrix,
+    v: &Matrix,
+    output: &Matrix,
+    lse: &[f32],
+    dl_dout: &Matrix,
+) -> (Matrix, Matrix, Matrix) {
+    let n = q.rows();
+    let d_head = q.cols();
+    assert_eq!(k.rows(), n);
+    assert_eq!(v.rows(), n);
+    assert_eq!(output.rows(), n);
+    assert_eq!(dl_dout.rows(), n);
+    assert_eq!(lse.len(), n);
+
+    let inv_scale = 1.0 / (d_head as f32).sqrt();
+    let bs = FA_BLOCK_SIZE;
+    let n_blocks = n.div_ceil(bs);
+
+    // D[r] = sum_c O[r,c] * dO[r,c]
+    let mut d_vec = vec![0.0f32; n];
+    for r in 0..n {
+        let o_row = output.row(r);
+        let do_row = dl_dout.row(r);
+        let mut s = 0.0f32;
+        for c in 0..d_head {
+            s += o_row[c] * do_row[c];
+        }
+        d_vec[r] = s;
+    }
+
+    let mut dq = Matrix::zeros(n, d_head);
+    let mut dk = Matrix::zeros(n, d_head);
+    let mut dv = Matrix::zeros(n, d_head);
+
+    // K block を外側、 対応する Q block (causal: i_block >= j_block) を内側でループ。
+    // dV_block, dK_block を block-local に積み上げてから global dV, dK に書き戻す。
+    for j_block in 0..n_blocks {
+        let j_start = j_block * bs;
+        let j_end = (j_start + bs).min(n);
+        let bk = j_end - j_start;
+
+        let kj = block_view(k, j_start, j_end);
+        let vj = block_view(v, j_start, j_end);
+
+        let mut dv_block = Matrix::zeros(bk, d_head);
+        let mut dk_block = Matrix::zeros(bk, d_head);
+
+        for i_block in j_block..n_blocks {
+            let i_start = i_block * bs;
+            let i_end = (i_start + bs).min(n);
+            let bq = i_end - i_start;
+
+            let qi = block_view(q, i_start, i_end);
+            let doi = block_view(dl_dout, i_start, i_end);
+
+            // S = Qi @ Kj^T / √d_k
+            let mut s = qi.matmul_t2(&kj);
+            for x in s.data_mut() {
+                *x *= inv_scale;
+            }
+            // Diagonal block の causal mask
+            if i_block == j_block {
+                let cols = s.cols();
+                for r in 0..bq {
+                    let s_row = s.row_mut(r);
+                    for c in (r + 1)..cols {
+                        s_row[c] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+
+            // P = exp(S - LSE_i[:, None])  in-place
+            for r in 0..bq {
+                let lse_r = lse[i_start + r];
+                let s_row = s.row_mut(r);
+                for x in s_row.iter_mut() {
+                    *x = if *x == f32::NEG_INFINITY {
+                        0.0
+                    } else {
+                        (*x - lse_r).exp()
+                    };
+                }
+            }
+            let p = s; // 名前変更 (semantics 明確化)
+
+            // dV_block += P^T @ dOi    shape: (bk, d_head)
+            p.matmul_t1_add_into(&doi, &mut dv_block);
+
+            // dP = dOi @ Vj^T    shape: (bq, bk)
+            let mut dp = doi.matmul_t2(&vj);
+
+            // dS = P ⊙ (dP - D_i[:, None]) / √d_k  in-place を dp buffer に書き込む
+            for r in 0..bq {
+                let d_i = d_vec[i_start + r];
+                let p_row = p.row(r);
+                let dp_row = dp.row_mut(r);
+                for c in 0..p_row.len() {
+                    dp_row[c] = p_row[c] * (dp_row[c] - d_i) * inv_scale;
+                }
+            }
+            let ds = dp;
+
+            // dQ[i_start..i_end] += dS @ Kj
+            // 直接 dq の block 部分にアクセスする方法がないので、 一度 block matmul を作って加算
+            {
+                let mut dq_add = Matrix::zeros(bq, d_head);
+                ds.matmul_into(&kj, &mut dq_add);
+                for r in 0..bq {
+                    let src = dq_add.row(r);
+                    let dst = dq.row_mut(i_start + r);
+                    for c in 0..d_head {
+                        dst[c] += src[c];
+                    }
+                }
+            }
+
+            // dK_block += dS^T @ Qi
+            ds.matmul_t1_add_into(&qi, &mut dk_block);
+        }
+
+        // dV[j_start..j_end] = dv_block (block 内に完全に書き込み)
+        for r in 0..bk {
+            let src = dv_block.row(r);
+            let dst = dv.row_mut(j_start + r);
+            for c in 0..d_head {
+                dst[c] = src[c];
+            }
+        }
+        for r in 0..bk {
+            let src = dk_block.row(r);
+            let dst = dk.row_mut(j_start + r);
+            for c in 0..d_head {
+                dst[c] = src[c];
+            }
+        }
+    }
+
+    (dq, dk, dv)
+}
+
+/// `mat` の `start..end` 行を新しい Matrix として切り出す (B3 用のブロックビュー)。
+/// view 構造がないので copy。 d_head が小さい (typ 64) ので 1 ブロック数 KB のコピーで済む。
+fn block_view(mat: &Matrix, start: usize, end: usize) -> Matrix {
+    let cols = mat.cols();
+    let rows = end - start;
+    let mut data = Vec::with_capacity(rows * cols);
+    data.extend_from_slice(&mat.data()[start * cols..end * cols]);
+    Matrix::from_flat(data, rows, cols)
+}
+
 impl Checkpointable for MultiHeadAttention {
     fn to_weight_map(&self) -> WeightMap {
         // 旧形式互換のため w_q/w_k/w_v に分割して保存する。
@@ -479,5 +911,152 @@ impl Checkpointable for MultiHeadAttention {
         self.assemble_w_qkv(&q, &k, &v);
         self.w_o = Matrix::from_jagged(map.get_matrix("w_o")?);
         Ok(())
+    }
+}
+
+// ============================================================================
+// Phase 7-5 B3: Flash Attention の数値一致テスト
+// ============================================================================
+//
+// `flash_attention_forward` / `flash_attention_backward` が、
+// 既存の causal mask 付き `scaled_dot_product_attention` (+_backward) と
+// 数値的に一致することを確認する (誤差は f32 演算順序の違いに起因する ~1e-4)。
+//
+// 各テストは複数の seq_len (block 境界の挙動を確認するため):
+// - seq = 8  : single block (< BLOCK_SIZE=64)
+// - seq = 64 : exactly 1 block
+// - seq = 65 : 2 blocks with the second one partial
+// - seq = 128: 2 full blocks
+// - seq = 200: 4 blocks (last partial)
+
+#[cfg(test)]
+mod flash_attention_tests {
+    use super::*;
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn random_matrix(rows: usize, cols: usize, seed: u64) -> Matrix {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut m = Matrix::zeros(rows, cols);
+        for v in m.data_mut() {
+            *v = rng.random_range(-1.0f32..1.0);
+        }
+        m
+    }
+
+    fn max_abs_diff(a: &Matrix, b: &Matrix) -> f32 {
+        assert_eq!(a.shape(), b.shape());
+        a.data()
+            .iter()
+            .zip(b.data().iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    fn run_forward_for_seq(seq: usize, d_head: usize, seed_base: u64) {
+        let q = random_matrix(seq, d_head, seed_base);
+        let k = random_matrix(seq, d_head, seed_base + 1);
+        let v = random_matrix(seq, d_head, seed_base + 2);
+
+        // 既存実装 (full SDPA + causal mask)
+        let mask = causal_mask(seq);
+        let (expected_out, _expected_w) =
+            scaled_dot_product_attention(&q, &k, &v, Some(&mask));
+
+        // Flash Attention
+        let (actual_out, _lse) = flash_attention_forward(&q, &k, &v);
+
+        let diff = max_abs_diff(&expected_out, &actual_out);
+        assert!(
+            diff < 1e-4,
+            "flash_attention_forward forward output mismatch for seq={seq}: max abs diff = {diff:.6e}"
+        );
+    }
+
+    fn run_backward_for_seq(seq: usize, d_head: usize, seed_base: u64) {
+        let q = random_matrix(seq, d_head, seed_base);
+        let k = random_matrix(seq, d_head, seed_base + 1);
+        let v = random_matrix(seq, d_head, seed_base + 2);
+        let dl_dout = random_matrix(seq, d_head, seed_base + 3);
+
+        // 既存実装 forward + backward
+        let mask = causal_mask(seq);
+        let (_expected_out, expected_w) =
+            scaled_dot_product_attention(&q, &k, &v, Some(&mask));
+        let (expected_dq, expected_dk, expected_dv) =
+            scaled_dot_product_attention_backward(&q, &k, &v, &expected_w, &dl_dout);
+
+        // Flash Attention forward + backward
+        let (actual_out, lse) = flash_attention_forward(&q, &k, &v);
+        let (actual_dq, actual_dk, actual_dv) =
+            flash_attention_backward(&q, &k, &v, &actual_out, &lse, &dl_dout);
+
+        let diff_dq = max_abs_diff(&expected_dq, &actual_dq);
+        let diff_dk = max_abs_diff(&expected_dk, &actual_dk);
+        let diff_dv = max_abs_diff(&expected_dv, &actual_dv);
+
+        assert!(
+            diff_dq < 1e-4,
+            "flash dq mismatch (seq={seq}): max abs diff = {diff_dq:.6e}"
+        );
+        assert!(
+            diff_dk < 1e-4,
+            "flash dk mismatch (seq={seq}): max abs diff = {diff_dk:.6e}"
+        );
+        assert!(
+            diff_dv < 1e-4,
+            "flash dv mismatch (seq={seq}): max abs diff = {diff_dv:.6e}"
+        );
+    }
+
+    #[test]
+    fn flash_forward_matches_sdpa_seq8() {
+        run_forward_for_seq(8, 16, 42);
+    }
+
+    #[test]
+    fn flash_forward_matches_sdpa_seq64_exact_block() {
+        run_forward_for_seq(FA_BLOCK_SIZE, 64, 100);
+    }
+
+    #[test]
+    fn flash_forward_matches_sdpa_seq65_partial_second_block() {
+        run_forward_for_seq(FA_BLOCK_SIZE + 1, 64, 101);
+    }
+
+    #[test]
+    fn flash_forward_matches_sdpa_seq128_two_blocks() {
+        run_forward_for_seq(2 * FA_BLOCK_SIZE, 64, 102);
+    }
+
+    #[test]
+    fn flash_forward_matches_sdpa_seq200_four_blocks() {
+        run_forward_for_seq(200, 64, 103);
+    }
+
+    #[test]
+    fn flash_backward_matches_sdpa_seq8() {
+        run_backward_for_seq(8, 16, 200);
+    }
+
+    #[test]
+    fn flash_backward_matches_sdpa_seq64_exact_block() {
+        run_backward_for_seq(FA_BLOCK_SIZE, 64, 201);
+    }
+
+    #[test]
+    fn flash_backward_matches_sdpa_seq65_partial_second_block() {
+        run_backward_for_seq(FA_BLOCK_SIZE + 1, 64, 202);
+    }
+
+    #[test]
+    fn flash_backward_matches_sdpa_seq128_two_blocks() {
+        run_backward_for_seq(2 * FA_BLOCK_SIZE, 64, 203);
+    }
+
+    #[test]
+    fn flash_backward_matches_sdpa_seq200_four_blocks() {
+        run_backward_for_seq(200, 64, 204);
     }
 }

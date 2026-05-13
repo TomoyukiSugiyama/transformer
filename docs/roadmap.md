@@ -93,8 +93,7 @@ Phase 6-c で per-step ~11,000 ms (3000 step ≒ 9.2 h) になり、 GPU 移植�
 | **Phase 7-2 旧 API クリーンアップ** | `forward(&[Vec<f32>])` 系を全削除 (27 メソッド)、 `*_matrix` → bare 名にリネーム、 KV-cache 推論パス (`forward_step`) も Matrix 直叩き化 | ✅ 完了 |
 | **Phase 7-3 transpose 排除** | backward の `_.transpose().matmul(_)` 17 箇所を `matmul_t1`/`matmul_t2` (BLAS の trans フラグ) に置換、 1.12x speedup vs 7-2 | ✅ 完了 |
 | **Phase 7-4 fused matmul-add + alloc 削減** | `matmul_*_add_into` (BLAS beta=1) で 10 個の grad 累積を 1 sgemm に圧縮 + scores.clone() 削除 + softmax backward in-place 化、 **1.43x speedup vs 7-3** (1352→945 ms)、 per-step alloc ~440MB→~50MB | ✅ 完了 |
-| **B3 Flash Attention 風 (CPU online softmax)** | `seq² × n_heads × n_layers` メモリ I/O を削減 | 📋 未着手 |
-| **MHA 内部 buffer field 化** | `fwd_buf_qkv` / `bwd_buf_dl_dqkv` 等を pre-allocate して残る per-step alloc を削減 | 📋 未着手 |
+| **Phase 7-5 MHA buffer field 化 + Flash Attention** | `buf_qkv` 等 7 つの reusable buffer 追加で per-step alloc ~30 MB 削減 + block-tiled online softmax (BLOCK=256) で `seq²` 行列を materialize しない、 causal upper triangle skip で attention FLOP ~半減、 数値一致テスト 10 件全 pass | ✅ 完了 |
 
 詳細は [`docs/performance.md`](performance.md#phase-7-大規模高速化-2026-05-) を参照。
 

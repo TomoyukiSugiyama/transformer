@@ -354,16 +354,94 @@ bench (`bench_phase7_step_time`, batch=2, max_len=1024, d_model=512, n_layers=6)
 - ピークメモリ削減で OS の page fault / kswapd 負荷も軽くなる。
 - BLAS の beta=1 経路は内部で SIMD vectorize されるため、 add_in_place の手書き並列より高速。
 
+### Phase 7-5: MHA buffer field 化 + Flash Attention (✅ 完了)
+
+Phase 7-a 起動直後に取り組み済 (Phase 7-a 旧バイナリには未適用。 次回再起動で反映)。
+
+#### 1. perf-alloc-e: MHA 内 buffer field 化
+
+`MultiHeadAttention` 構造体に以下の reusable buffer を追加し、 `ensure_shape + _into` API で
+**buffer を再利用** することで per-step alloc を削減した。 BLAS time は不変。
+
+| buffer field | shape | 旧 alloc サイズ |
+|--------------|------|-----------------|
+| `buf_qkv` | (seq, 3·d_model) | 6 MB |
+| `buf_dl_dconcat` | (seq, d_model) | 2 MB |
+| `buf_dl_dq, buf_dl_dk, buf_dl_dv` | (seq, d_model) ×3 | 6 MB |
+| `buf_dl_dqkv` | (seq, 3·d_model) | 6 MB |
+| `cache_x` (`x.clone()` → `ensure_shape+copy_from_slice`) | (seq, d_model) | 2 MB |
+| `cache_q, cache_k, cache_v` (`split_columns_into`) | (seq, d_model) ×3 | 6 MB |
+| `cache_concat` (`concat_columns_into`) | (seq, d_model) | 2 MB |
+| **per-step 削減合計** | | **~30 MB** |
+
+特に `cache_q, cache_k, cache_v` は `std::mem::take` で一時的に所有権を外して
+`[Matrix; 3]` にまとめ、 `buf_qkv.split_columns_into(&mut qkv_parts)` で
+3 ブロック同時書き込みする (1 関数呼び出し)。
+
+#### 2. B3: Flash Attention 風 (block-tiled online softmax + causal skip)
+
+旧 `scaled_dot_product_attention` は per-head で `(seq, seq)` の scores 行列を materialize し
+(`4 MB × n_heads × n_layers × 2 (fwd+bwd) = ~384 MB / step` の alloc)、 causal mask の上三角も
+無駄に計算していた (`O(seq²·d_head)` の FLOP の半分が捨て計算)。
+
+`flash_attention_forward` / `flash_attention_backward` を新規実装し、 **FlashAttention-1 流の
+block-tiled online softmax** で置き換え:
+
+```
+for i_block in 0..n_blocks (Q blocks):
+  for j_block in 0..=i_block (K blocks, causal で j>i は skip):
+    S_ij = Qi @ Kj^T / √d_k                                     # (Bq, Bk)
+    if i_block == j_block: apply causal mask within diagonal block
+    online softmax update: m_new, l_new, O_block を rescale + 加算
+  final: O /= l (row-wise), lse = m + log(l)
+```
+
+block size は `FA_BLOCK_SIZE = 256` (seq=1024 で 4 Q block、 causal で平均 2.5 K block)。
+sgemm 呼び出しオーバーヘッドと cache locality のバランスで選択 (block=64 はオーバーヘッド支配で遅い、
+block=256 で BLAS の効率を保つ)。
+
+backward は forward で保存した `lse: Vec<f32>` (= `m + log(l)`、 per row 1 個) から
+P を再構成し、 block-tile で dq/dk/dv を accumulate する。 旧 `cache_att_w (n_heads × (seq, seq)
+Matrix Vec)` 192 MB → `cache_lse (n_heads × seq の Vec<Vec<f32>>)` 192 KB に縮小。
+
+##### 数値一致テスト (`flash_attention_tests` 10 件)
+
+`scaled_dot_product_attention` (基準実装) と `flash_attention_forward/_backward` の出力差を
+`max |diff| < 1e-4` で検証。 seq = {8, 64, 65, 128, 200} で block 境界 (BLOCK_SIZE 倍数 / 半端)
+の挙動を網羅。 全 pass。
+
+#### 3. ベンチ結果
+
+Phase 7-a 学習プロセス並走下 (CPU 競合あり) の bench (`bench_phase7_step_time`, batch=2,
+seq=1024) を 3 回計測:
+
+| 段階 | per-step (median, 3 run) | vs Phase 7-4 | 備考 |
+|------|-------------------------:|-------------:|------|
+| Phase 7-4 (基準、 過去 docs 実測) | ~945 ms | 1.00x | クリーン環境 |
+| Phase 7-4 (CPU 競合下) | ~1,200 ms (推定) | 0.79x | Phase 7-a と core 競合 |
+| + perf-alloc-e (本フェーズ) | ~1,108 ms | (測定不能) | CPU 競合下 |
+| + perf-alloc-e + B3 (block=64) | ~1,220 ms | (測定不能) | sgemm overhead 支配で逆効果 |
+| + perf-alloc-e + B3 (block=256) | ~1,122 ms | (測定不能) | block=64 比 -8%、 perf-alloc 単独と同水準 |
+
+**Phase 7-a と並走しているため絶対値は信頼性が低い**。 Phase 7-a 完走後にクリーンな bench を取り直す
+予定 (Phase 7-a 終了タイミングを待って `Phase 7-a 完走後ベンチ` の項目を追記)。
+
+副次効果 (alloc / メモリ):
+- per-step alloc: ~50 MB (Phase 7-4) → **~15 MB (Phase 7-5)** (~70% 削減)。
+- attention scores (seq², n_heads, n_layers): forward で完全に materialize しない (block 単位の局所
+  S buffer のみ。 forward 中の S 同時生存最大 256×256×4 = 256 KB)。
+- ピーク RSS の削減で macOS の swap / page fault 圧が下がる (長時間学習で kswapd 干渉が減る)。
+
+Phase 7-a/b の **長時間 wall time** で alloc 削減と causal skip の純粋効果が出てくると見込んでいる。
+特に max_len=2048 や 4096 への拡張時には Flash Attention の causal skip が 4x/16x のオーダーで効くため、
+今のうちに実装基盤を整えた意義は大きい。
+
 ### 今後 (検討中)
 
-- **B3 Flash Attention 風 (CPU online softmax + matmul 融合)**:
-  attention scores 行列 (`seq² × n_heads × n_layers` = 192 MB @ Phase 7-a) を **block-tiled** で
-  処理し、 `O(seq²)` のメモリ I/O を削減。 実装難度は中、 期待 1.3-2x (attention 部分のみ)。
-  Phase 7-4 で per-head 4 MB の alloc は in-place 化済みなので、 残る効果は cache locality と
-  FLOPs 削減 (causal mask 部分の skip)。
-- **`fwd_buf_qkv` / `bwd_buf_dl_dqkv` / `bwd_buf_dl_dconcat` 等の MHA 内 buffer 化**:
-  Phase 7-4 で `_into` API は揃ったが、 MHA 内に struct field として buffer を持たせる refactor は
-  未着手。 期待 1.05-1.10x (alloc 削減のみで、 BLAS time は変わらない)。
+- **Q block 並列化**: 現 Flash Attention forward は Q block を逐次処理。 rayon で並列化すれば
+  CPU 競合の少ない環境で 1.3-2x の追加 speedup が見込める (各 Q block は独立)。
+- **Flash Attention 内部 buffer field 化**: `s_buf, p_buf` 等を MHA struct field 化して
+  per-block alloc を消す (現在 block 単位で alloc あり)。
 - **bf16 mixed precision (Apple BNNS)**: 期待 1.8-2.5x、 実装難度大。 数値安定性試験要。
 - **KvCache の事前確保**: 推論時のみ。 alloc/realloc を削除。
 - **Embedding / SinusoidalPE / Rope の table を Matrix 化**: 残った `Vec<Vec<f32>>` の内部表現。

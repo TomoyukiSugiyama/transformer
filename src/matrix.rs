@@ -57,6 +57,19 @@ pub struct Matrix {
     cols: usize,
 }
 
+impl Default for Matrix {
+    /// 形状 (0, 0)、 内部 `Vec<f32>` も空の "プレースホルダ" Matrix。
+    /// `std::mem::take(&mut field)` で一時的に所有権を取り出してから戻す
+    /// パターンで利用する (perf-alloc 系の buffer reuse で多用)。
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            rows: 0,
+            cols: 0,
+        }
+    }
+}
+
 impl Matrix {
     /// 全要素 0 で初期化した (rows, cols) 行列。
     pub fn zeros(rows: usize, cols: usize) -> Self {
