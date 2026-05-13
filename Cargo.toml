@@ -8,3 +8,10 @@ default-run = "transformer"
 matrixmultiply = "0.3.10"
 rand = "0.10.1"
 rayon = "1.10"
+
+# Phase 8-1 corpus 準備用 (HuggingFace から Wikipedia 日本語版 parquet を取得・解凍)。
+# 学習側 binary には影響しないが、 cargo build 時の依存は増える。
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow-array = "53"
+arrow-schema = "53"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

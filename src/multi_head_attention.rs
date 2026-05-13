@@ -932,7 +932,6 @@ impl Checkpointable for MultiHeadAttention {
 #[cfg(test)]
 mod flash_attention_tests {
     use super::*;
-    use rand::Rng;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 

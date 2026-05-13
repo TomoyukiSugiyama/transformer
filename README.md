@@ -153,6 +153,10 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 ルビ (`《...》`)・ 編集注記 (`［＃...］`)・ 底本情報を除去した本文を出力する
 (python3 が必要)。
 
+> Wikipedia 日本語版の取得 (Phase 8-1) は `parquet` / `arrow-array` / `arrow-schema` / `reqwest` を
+> 追加で依存している (Cargo.toml 参照)。 学習側 binary には影響しないが、 cargo build は
+> 重くなる。 corpus 取得が完了して以降は workspace 分離も検討候補。
+
 #### 派生コーパス (Phase 7-1 / `src/bin/clean_aozora_corpus.rs`)
 
 ```bash
@@ -163,6 +167,23 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 ```
 
 詳細は [docs/phase7.md](docs/phase7.md) を参照。
+
+#### Wikipedia 日本語版 (Phase 8-1 / `src/bin/fetch_wikipedia_ja.rs` + `clean_wikipedia_corpus.rs`)
+
+```bash
+# [A] HuggingFace `wikimedia/wikipedia` (snapshot 20231101.ja) から
+#     parquet を Pure Rust で取得し text 列を抽出。 累計 1B char 到達で打ち切り。
+cargo run --release --bin fetch_wikipedia_ja
+# → corpus/wikipedia_ja_raw.txt (~1.04B char / 370,523 記事、 2.5 GB)
+# → corpus/_wiki_tmp/  (parquet キャッシュ、 不要なら削除可)
+
+# [B] trailing reference section (脚注 / 出典 / 関連項目 / 外部リンク 他) 以降を
+#     切り捨て + 短記事 (<200 char) 破棄 + 連続空行を 1 空行に正規化。
+cargo run --release --bin clean_wikipedia_corpus
+# → corpus/wikipedia_ja.txt (~974.7M char / 345,958 記事、 2.4 GB、 入力の 93.4% 保持)
+```
+
+ライセンス: CC-BY-SA 4.0 (Wikimedia Foundation)。 詳細は [docs/phase8.md](docs/phase8.md) を参照。
 
 ### 学習
 
@@ -285,7 +306,9 @@ src/
 └── bin/                       # CLI ユーティリティ (`cargo run --release --bin <name>` で実行)
     ├── analyze_corpus.rs      # コーパス分析 (作家ヘッダ / 戯曲行 / 章番号 等を統計化) ※Phase 7-1
     ├── clean_aozora_corpus.rs # 旧コーパス → v2 形式に変換 (special token + 戯曲ラップ + 章番号削除) ※Phase 7-1
-    └── extend_tokenizer.rs    # 既存 CharBPE cache に special token を追加 ※Phase 7-1
+    ├── extend_tokenizer.rs    # 既存 CharBPE cache に special token を追加 ※Phase 7-1
+    ├── fetch_wikipedia_ja.rs  # HuggingFace `wikimedia/wikipedia` から parquet を取得し text 抽出 ※Phase 8-1
+    └── clean_wikipedia_corpus.rs # Wikipedia raw → 学習用 (trailing section 切り捨て + 短記事破棄) ※Phase 8-1
 
 scripts/
 ├── download_tiny_shakespeare.sh    # Karpathy char-rnn から取得
@@ -298,8 +321,12 @@ corpus/                             # gitignore (各種スクリプトで再生�
 ├── aozora_kokoro.txt               # Phase 4a 用 (日本語 484 KB, ~162k char)
 ├── aozora_soseki_works.txt         # Phase 4b 用 (日本語 3.5 MB, ~1.21M char)
 ├── aozora_meiji_taisho.txt         # Phase 5-3 / 5-4 / 6 用 (日本語 24.5 MB, 826 万 char, 504 作品)
-└── aozora_meiji_taisho_v2.txt      # Phase 7-a 用 (上記をクレンジング: ===== ヘッダ → special token、
-                                    # 戯曲 8 作品を <DRAMA>...</DRAMA> で wrap、 章番号 1131 行削除)
+├── aozora_meiji_taisho_v2.txt      # Phase 7-a 用 (上記をクレンジング: ===== ヘッダ → special token、
+│                                   # 戯曲 8 作品を <DRAMA>...</DRAMA> で wrap、 章番号 1131 行削除)
+├── wikipedia_ja_raw.txt            # Phase 8-1 [A] 出力 (HuggingFace wikimedia/wikipedia ja から
+│                                   # parquet 経由で抽出、 ~1.04B char / 370,523 記事、 2.5 GB)
+└── wikipedia_ja.txt                # Phase 8-1 [B] 出力 (trailing section 切り捨て + 短記事破棄、
+                                    # ~974.7M char / 345,958 記事、 2.4 GB)
 
 tokenizers/                         # gitignore (CharBPE 訓練時に生成・キャッシュ)
 ├── charbpe_v8000_aozora_meiji_taisho_s500000.bin        # Phase 6-a/6-c/6-d 用 (vocab 8000)
@@ -319,6 +346,7 @@ docs/                              # 詳細ドキュメント (本 README から
 ├── phase5.md                      # 生成品質向上 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大)
 ├── phase6.md                      # トークナイザ刷新 (Phase 6-a / 6-d 完走結果)
 ├── phase7.md                      # コーパス前処理 + 作家・戯曲 special token (Phase 7-1) + Phase 7-a 設定
+├── phase8.md                      # 大規模コーパス (Wikipedia ja) + Tokenizer 32K + モデル拡大 (d=768, ~50M)
 ├── roadmap.md                     # 今後の改善案
 ├── kv_cache.md                    # KV cache の実装解説
 ├── sota_comparison.md             # SoTA LLM との要素別比較

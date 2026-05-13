@@ -610,7 +610,11 @@ fn main() {
     //   なお初回 (pre-clean) は step 780 まで進めて停止 (val_ppl 100 @ step 600)、 クレンジング完了後に再起動 → checkpoints/..._pre_clean_aborted_step780/ に退避
     //   期待: total ~5 h、 BPC 4.22 → 3.9-4.1 (-3〜-7%)、 戯曲混入と作家ミックスとヘッダ生成の構造的解消。
     let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
-    training_and_inference(&cfg);
+    // training_and_inference(&cfg);
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2/best.bin",
+    );
 
     // Phase 6-d: Phase 6-c と同形状 + WSD scheduler + Phase 7-1/7-2 (Matrix 直叩き + QKV 融合) 高速化。 ✅ 完了
     //   best val_loss 4.274018 @ step 2800, val_ppl 71.81, bpc 4.22 (val 基準) / 3.74 (full-corpus 基準)

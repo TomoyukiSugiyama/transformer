@@ -111,6 +111,26 @@ Phase 6-d で残った質的課題 (戯曲記号混入、 作家ヘッダ生成�
 
 詳細は [`docs/phase7.md`](phase7.md) を参照。
 
+## 大規模コーパス + Tokenizer 拡大 + モデル拡大 (Phase 8) — 🟡 進行中
+
+Phase 7-a までの 20M params × 5M token は Chinchilla 比 **80x 不足**で、 モデル拡大の前にデータ拡大が必須。 Wikipedia 日本語版 (~1B char) を加えて 3 軸を同時拡大する。
+
+| 軸 | 現状 | Phase 8 目標 | 比率 |
+|---|---:|---:|---:|
+| コーパス chars | 8.28 M | ~1 B | 120x |
+| Tokenizer vocab | 8,009 | 32,000 | 4x |
+| モデル params | ~20 M | ~50 M (d=768, L=8) | 2.5x |
+
+| 項目 | 内容 | 状態 |
+|------|------|------|
+| **P8-1 [A]** Wikipedia 取得 | `src/bin/fetch_wikipedia_ja.rs` で HuggingFace `wikimedia/wikipedia` (20231101.ja) から Pure Rust + parquet 経由で 1.04B char / 370,523 記事を 63 秒で取得 | ✅ 完了 |
+| **P8-1 [B]** Wikipedia クレンジング | `src/bin/clean_wikipedia_corpus.rs` で trailing reference section 切り捨て + 短記事破棄 → `corpus/wikipedia_ja.txt` (974.7M char / 345,958 記事、 93.4% 保持) | ✅ 完了 |
+| P8-1 [C] 混合コーパス作成 | Aozora v2 (8M char) + Wikipedia (974M char) → `corpus/aozora_wikipedia_mixed.txt` (~1B char) | ⏳ 未着手 |
+| P8-1 [D] CharBPE vocab 8K → 32K 再訓練 | `tokenizers/charbpe_v32010_aozora_wikipedia.bin` (special token 維持) | ⏳ 未着手 |
+| P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_d768_n8_charbpe32k_max1024_wsd()` (d=768, L=8, vocab=32K, ~50M params)、 per-step ~18-25 s、 完走 25-40 h 想定。 BPC: Phase 7-a 比 -15〜-17% (3.5-3.8) 期待 | ⏳ 未着手 |
+
+詳細は [`docs/phase8.md`](phase8.md) を参照。
+
 ## 学習時間の高速化 (Phase 6 候補) — 旧記述
 
 Phase 5-4a (d=512, n_layers=6, batch=32) の現状: per-step ~9.4s、 実効 150 GFLOPS
