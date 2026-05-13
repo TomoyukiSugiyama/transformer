@@ -71,14 +71,23 @@ Phase 8-1 (コーパス) → 8-2 (tokenizer) → 8-3 (model) の順で着手。
 - **学習時の挙動**: chunk_len=1024 のスライディングウィンドウで random sampling → Aozora 由来の窓は ~0.84% 程度 (= 3000 step × batch 16 ≒ 48000 窓 中 ~400 窓)。 Wikipedia 主体だが文学的文体の信号は維持される想定。
 - **注**: Aozora の重み付けが不足だった場合、 `REPEAT_AOZORA` を 5-20 に上げて再生成可能。 Phase 8-1 [E] 実行後の生成品質を見て判断する。
 
-#### [D] CharBPE vocab 8K → 32K 再訓練 ⏳ 未着手
+#### [D] CharBPE vocab 8K → 32K 再訓練 🟡 実装済 / Phase 7-a 完走後に実行
 
-- **入力**: `corpus/aozora_wikipedia_mixed.txt` (~1B char)
-- **vocab**: 32,000 (Aozora 文学語彙 + Wikipedia 一般語彙 + Aozora special token 10 個)
-- **学習サンプル**: 1M chars (Aozora 8M を全域、 Wikipedia から sampling)
-- **期待 chars/token**: 1.8-2.0 (vocab 倍増の効果、 現 8K で 1.46 → 32K で +20-30% 圧縮)
+- **実装**: `src/bin/train_tokenizer_phase8.rs`
+- **入力 coverage_text**: `corpus/aozora_wikipedia_mixed.txt` 全体 (~983M char、 unique char ~15.8K)
+- **入力 merge_text**: stratified sample (Aozora 先頭 500K chars + Wikipedia 先頭 1.5M chars = **2M chars**)
+  - Aozora の `<BOS><AUTHOR=...><TITLE>...</TITLE>` 区切りパターンと Wikipedia の現代日本語 + 英数記号の両方を BPE merge が学習できるよう構成
+- **target vocab**: 32,000 (BPE) + 10 special token = **32,010**
+- **special tokens**: Phase 7-1 と同一 10 個 (`<TITLE>` / `</TITLE>` / `<DRAMA>` / `</DRAMA>` + 6 作家)
+- **期待 chars/token**:
+  - Aozora 部分: 1.7-1.9 (現 8K で 1.46)
+  - Wikipedia 部分: 1.6-1.8 (英数 + 漢字混在で BPE が効きやすい)
 - **出力**: `tokenizers/charbpe_v32010_aozora_wikipedia.bin`
-- **学習時間予測**: rayon 並列化 + sample 1M chars で 5-10 分
+- **学習時間予測**:
+  - Phase 7-a と並走時: ~70-100 分 (CPU 競合で BPE merge ループが遅い)
+  - **単独実行時 (Phase 7-a 完走後)**: ~30-50 分 (rayon 10 コア使用可)
+- **初回試行ログ**: Phase 7-a 並走中に起動して 11 分稼働後に中断 (`logs/train_tokenizer_phase8.log`)。
+  CPU 競合が Phase 7-a per-step を 7,700ms → 10,000ms に押し上げたため、 完走後の単独実行に切替えた。
 
 #### [E] Phase 8 config 追加 + 学習起動 ⏳ 未着手
 

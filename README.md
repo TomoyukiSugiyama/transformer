@@ -314,7 +314,8 @@ src/
     ├── extend_tokenizer.rs    # 既存 CharBPE cache に special token を追加 ※Phase 7-1
     ├── fetch_wikipedia_ja.rs  # HuggingFace `wikimedia/wikipedia` から parquet を取得し text 抽出 ※Phase 8-1
     ├── clean_wikipedia_corpus.rs # Wikipedia raw → 学習用 (trailing section 切り捨て + 短記事破棄) ※Phase 8-1
-    └── mix_corpus.rs          # Aozora v2 + Wikipedia ja を連結して混合コーパス生成 ※Phase 8-1
+    ├── mix_corpus.rs          # Aozora v2 + Wikipedia ja を連結して混合コーパス生成 ※Phase 8-1
+    └── train_tokenizer_phase8.rs # 混合コーパスで CharBPE 32K 訓練 (stratified sample + special token) ※Phase 8-1
 
 scripts/
 ├── download_tiny_shakespeare.sh    # Karpathy char-rnn から取得
