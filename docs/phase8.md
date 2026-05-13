@@ -58,12 +58,18 @@ Phase 8-1 (コーパス) → 8-2 (tokenizer) → 8-3 (model) の順で着手。
   - 平均記事長: ~2,820 chars
   - 中央値記事長: ~1,303 chars
 
-#### [C] Aozora + Wikipedia 混合コーパス ⏳ 未着手
+#### [C] Aozora + Wikipedia 混合コーパス ✅ 完了 (2026-05-14)
 
-- 目標: `corpus/aozora_wikipedia_mixed.txt` を生成
-- 構成: Aozora v2 (8M char) + Wikipedia (~990M char) を結合 → **~1B char**
-- 配合: 約 1:120 (Aozora は希少だが文学的文体を保持するため repeat なしで投入)
-- 記事/作品の区切り: `\n\n` (CharBPE が改行を独立 token として保持するので段落構造の信号になる)
+- **実装**: `src/bin/mix_corpus.rs` で単純連結 (Aozora を `REPEAT_AOZORA=1` 回、 `\n\n` で繋ぐ)
+- **結果**:
+  - Aozora: 8,273,062 chars (0.842%)
+  - Wikipedia: 974,734,708 chars (99.158%)
+  - 合計: **983,007,772 chars** (~983M, 2.4 GB)
+  - 処理時間: 4.0 秒
+  - 出力: `corpus/aozora_wikipedia_mixed.txt`
+- **境界**: 最後の Aozora 作品の `<EOS>` の後に `\n\n` を挟んで Wikipedia の最初の記事 (アンパサンド) が続く。 Aozora の `<BOS><AUTHOR=...><TITLE>...</TITLE>` special token はそのまま保持。
+- **学習時の挙動**: chunk_len=1024 のスライディングウィンドウで random sampling → Aozora 由来の窓は ~0.84% 程度 (= 3000 step × batch 16 ≒ 48000 窓 中 ~400 窓)。 Wikipedia 主体だが文学的文体の信号は維持される想定。
+- **注**: Aozora の重み付けが不足だった場合、 `REPEAT_AOZORA` を 5-20 に上げて再生成可能。 Phase 8-1 [E] 実行後の生成品質を見て判断する。
 
 #### [D] CharBPE vocab 8K → 32K 再訓練 ⏳ 未着手
 

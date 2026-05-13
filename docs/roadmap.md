@@ -125,7 +125,7 @@ Phase 7-a までの 20M params × 5M token は Chinchilla 比 **80x 不足**で�
 |------|------|------|
 | **P8-1 [A]** Wikipedia 取得 | `src/bin/fetch_wikipedia_ja.rs` で HuggingFace `wikimedia/wikipedia` (20231101.ja) から Pure Rust + parquet 経由で 1.04B char / 370,523 記事を 63 秒で取得 | ✅ 完了 |
 | **P8-1 [B]** Wikipedia クレンジング | `src/bin/clean_wikipedia_corpus.rs` で trailing reference section 切り捨て + 短記事破棄 → `corpus/wikipedia_ja.txt` (974.7M char / 345,958 記事、 93.4% 保持) | ✅ 完了 |
-| P8-1 [C] 混合コーパス作成 | Aozora v2 (8M char) + Wikipedia (974M char) → `corpus/aozora_wikipedia_mixed.txt` (~1B char) | ⏳ 未着手 |
+| **P8-1 [C]** 混合コーパス作成 | `src/bin/mix_corpus.rs` で Aozora v2 (8M char, 0.84%) + Wikipedia (974M char, 99.16%) → `corpus/aozora_wikipedia_mixed.txt` (**983M char**, 2.4 GB) | ✅ 完了 |
 | P8-1 [D] CharBPE vocab 8K → 32K 再訓練 | `tokenizers/charbpe_v32010_aozora_wikipedia.bin` (special token 維持) | ⏳ 未着手 |
 | P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_d768_n8_charbpe32k_max1024_wsd()` (d=768, L=8, vocab=32K, ~50M params)、 per-step ~18-25 s、 完走 25-40 h 想定。 BPC: Phase 7-a 比 -15〜-17% (3.5-3.8) 期待 | ⏳ 未着手 |
 

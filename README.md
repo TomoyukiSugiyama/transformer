@@ -182,6 +182,10 @@ cargo run --release --bin fetch_wikipedia_ja
 #     切り捨て + 短記事 (<200 char) 破棄 + 連続空行を 1 空行に正規化。
 cargo run --release --bin clean_wikipedia_corpus
 # → corpus/wikipedia_ja.txt (~974.7M char / 345,958 記事、 2.4 GB、 入力の 93.4% 保持)
+
+# [C] Aozora v2 + Wikipedia ja を連結して混合コーパス生成 (Aozora は repeat なしで先頭に投入)。
+cargo run --release --bin mix_corpus
+# → corpus/aozora_wikipedia_mixed.txt (~983M char, 2.4 GB、 Aozora 0.84% / Wikipedia 99.16%)
 ```
 
 ライセンス: CC-BY-SA 4.0 (Wikimedia Foundation)。 詳細は [docs/phase8.md](docs/phase8.md) を参照。
@@ -309,7 +313,8 @@ src/
     ├── clean_aozora_corpus.rs # 旧コーパス → v2 形式に変換 (special token + 戯曲ラップ + 章番号削除) ※Phase 7-1
     ├── extend_tokenizer.rs    # 既存 CharBPE cache に special token を追加 ※Phase 7-1
     ├── fetch_wikipedia_ja.rs  # HuggingFace `wikimedia/wikipedia` から parquet を取得し text 抽出 ※Phase 8-1
-    └── clean_wikipedia_corpus.rs # Wikipedia raw → 学習用 (trailing section 切り捨て + 短記事破棄) ※Phase 8-1
+    ├── clean_wikipedia_corpus.rs # Wikipedia raw → 学習用 (trailing section 切り捨て + 短記事破棄) ※Phase 8-1
+    └── mix_corpus.rs          # Aozora v2 + Wikipedia ja を連結して混合コーパス生成 ※Phase 8-1
 
 scripts/
 ├── download_tiny_shakespeare.sh    # Karpathy char-rnn から取得
@@ -326,8 +331,10 @@ corpus/                             # gitignore (各種スクリプトで再生�
 │                                   # 戯曲 8 作品を <DRAMA>...</DRAMA> で wrap、 章番号 1131 行削除)
 ├── wikipedia_ja_raw.txt            # Phase 8-1 [A] 出力 (HuggingFace wikimedia/wikipedia ja から
 │                                   # parquet 経由で抽出、 ~1.04B char / 370,523 記事、 2.5 GB)
-└── wikipedia_ja.txt                # Phase 8-1 [B] 出力 (trailing section 切り捨て + 短記事破棄、
-                                    # ~974.7M char / 345,958 記事、 2.4 GB)
+├── wikipedia_ja.txt                # Phase 8-1 [B] 出力 (trailing section 切り捨て + 短記事破棄、
+│                                   # ~974.7M char / 345,958 記事、 2.4 GB)
+└── aozora_wikipedia_mixed.txt      # Phase 8-1 [C] 出力 (Aozora v2 0.84% + Wikipedia 99.16%、
+                                    # ~983M char, 2.4 GB、 Phase 8 学習用)
 
 tokenizers/                         # gitignore (CharBPE 訓練時に生成・キャッシュ)
 ├── charbpe_v8000_aozora_meiji_taisho_s500000.bin        # Phase 6-a/6-c/6-d 用 (vocab 8000)
