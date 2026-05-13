@@ -36,7 +36,6 @@ use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use crate::{
     adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
     lr_scheduler::{LrScheduleKind, LrScheduler},
-    multi_head_attention::MultiHeadAttention,
     normalization::NormalizationKind, positional_encoding::PositionalEncodingKind,
     tokenizer::{
         Tokenizer, TokenizerKind, load_tokenizer_from_file, save_tokenizer_to_file,
@@ -544,6 +543,30 @@ impl Config {
         cfg
     }
 
+    /// Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 コーパス** + **special token (作家・戯曲)**。
+    ///
+    /// 変更点:
+    /// - corpus: `corpus/aozora_meiji_taisho_v2.txt` (504 作品、 旧 `=====` ヘッダを `<BOS><AUTHOR=...><TITLE>...</TITLE>...<EOS>` に変換、 戯曲フォーマット 8 作品を `<DRAMA>...</DRAMA>` で囲む)
+    /// - tokenizer: `tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin` (Phase 6-a の 8K cache に 10 個の special token を追加した拡張版。 `extend_tokenizer` バイナリで生成)
+    /// - vocab_size: 8000 → 8010 (=10 special tokens 追加)
+    /// - LR scheduler: Phase 6-d 同 (WSD warmup=300, stable=2160, decay=540)
+    /// - 高速化: Phase 7-3 (matmul_t1/t2) を取り込んだバイナリ
+    ///
+    /// 期待効果:
+    /// - 戯曲混入 (「ハムレット」「王妃」) の解消
+    /// - 作家トークン指定で文体 controllable
+    /// - 作家ヘッダ (`===== ... =====`) の生成消失
+    /// - per-step ~8000 ms 想定 (Phase 7-3 で Phase 6-d 9000 → 8000)
+    /// - 総時間 ~6 h
+    #[allow(dead_code)]
+    fn aozora_meiji_taisho_charbpe8k_max1024_wsd_v2() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024_wsd();
+        cfg.run_name = "phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2";
+        cfg.corpus_path = "corpus/aozora_meiji_taisho_v2.txt";
+        cfg.vocab_size = 8010; // 8000 (元 vocab) + 10 (TITLE/DRAMA + 6 author + close tags)
+        cfg
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
@@ -572,16 +595,24 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 6-d: Phase 6-c と同じ形状 (d=512, n=6, max_len=1024, vocab=8K) に
-    //   **WSD scheduler + Phase 7 (Matrix 直叩き + QKV 融合) 高速化** を適用。
-    //   期待 total: ~6-7 h (Phase 6-c の ~9 h 比 -25 〜 -30%)、
-    //          BPC: Phase 6-c と同等以上 (WSD で同 step 内の収束効率が向上)。
-    let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd();
-    // training_and_inference(&cfg);
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd/best.bin",
-    );
+    // Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-3 高速化バイナリ**。
+    //   - corpus: corpus/aozora_meiji_taisho_v2.txt (504 作品、 旧 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
+    //             戯曲 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1131 行を削除)
+    //   - tokenizer: tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin (8000 + 10 special token)
+    //   - LR: WSD (warmup=300, stable=2160, decay=540) — Phase 6-d と同
+    //   - 高速化: Phase 7-3 (matmul_t1/t2 で transpose materialize 排除、 1.12x speedup vs 7-2)
+    //   期待: total ~6 h、 BPC 4.24 → 3.9-4.0 (-5〜-8%)、 戯曲混入と作家ミックスの解消。
+    let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
+    training_and_inference(&cfg);
+
+    // Phase 6-d: Phase 6-c と同形状 + WSD scheduler + Phase 7 (Matrix 直叩き + QKV 融合) 高速化。 ✅ 完了
+    //   best val_loss ?? @ step 2000, val_ppl 72.86, BPC 4.24
+    //   推論サンプルでは戯曲混入 (「ハムレット」「王妃」)、 作家ミックス (「カムパネルラ」 漱石プロンプト) が観察 → Phase 7-a に進む
+    // let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd();
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd/best.bin",
+    // );
 
     // Phase 6-c: WarmupCosine 旧バイナリで起動して step 180 まで進めたが、
     //   Phase 7 高速化が完了したので Phase 6-d に振り替え。

@@ -123,11 +123,51 @@ CharBPE 8K に下記 special token を追加 (`extend_coverage` API を使う):
 
 ## 4. 実装手順 (P7-1-B 以降)
 
-| ステップ | 内容 | 工数 |
+| ステップ | 内容 | 状態 |
 |---------|------|------|
-| **P7-1-B** | `src/bin/clean_aozora_corpus.rs` 作成。 旧コーパスを読んで、 上記 v2 形式に変換 | 1.5 h |
-| **P7-1-C** | `CharBpeTokenizer` に special token を追加するスクリプト + キャッシュ更新 | 0.5 h |
-| **P7-1-D** | `main.rs` に `aozora_meiji_taisho_charbpe8k_max1024_wsd_v2()` config 追加。 学習起動 | 6-7 h (学習) |
+| **P7-1-B** | `src/bin/clean_aozora_corpus.rs` 作成。 旧コーパスを v2 形式に変換 | ✅ 完了 (504 作品 → 8,285,143 char、 戯曲 8 作品を `<DRAMA>` で囲む) |
+| **P7-1-C** | `CharBpeTokenizer::add_special_token` API + `src/bin/extend_tokenizer.rs` で 10 個の special token を追加 | ✅ 完了 (`tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin`) |
+| **P7-1-D** | `main.rs` に `aozora_meiji_taisho_charbpe8k_max1024_wsd_v2()` config 追加。 学習起動 | ✅ config 追加済、 ⏳ ユーザー判断待ち (学習 6-7 h 想定) |
+
+### 4.1 P7-1-B: corpus cleaning (`src/bin/clean_aozora_corpus.rs`)
+
+実行結果:
+- 入力: `corpus/aozora_meiji_taisho.txt` (8,274,972 char)
+- 出力: `corpus/aozora_meiji_taisho_v2.txt` (8,279,260 char、 +0.05%)
+- **作家ヘッダ変換**: 504 行 (`===== 作家『タイトル』 =====` → `<BOS><AUTHOR=作家>`)
+- **戯曲扱い (DRAMA で囲む)**: **8 作品** (172,382 char、 2.08%)
+  - 鴎外『最終の午後』『家常茶飯　附・現代思想』『辻馬車』『痴人と死と』『夏目漱石論』
+  - 太宰治『新ハムレット』『花吹雪』
+  - 宮沢賢治『ペンネンノルデはいまはいないよ ...』
+- 散文: 496 作品
+- **章番号行削除 (Phase 7-1-B 第 2 弾)**: **1,131 行** 削除
+  - パターン 1: 行頭全角/半角空白 + 漢数字 1-3 文字 (例: 「　　　　　五」) — 329 行
+  - パターン 2: 単独漢数字 1-3 文字 (例: 「一」 「二」 「三」) — 790 行
+  - パターン 3: 「第X章/節/部/編/話/卷/巻/回」 形式 — 14 行 (中間に漢数字/全角数字許容)
+  - 「（一）」「(1)」 等の本文に出現する括弧付き番号は対象外
+  - 検証: パターン 1+2+3 全て **残存 0 行** (rg で confirmed)
+
+### 4.2 P7-1-C: tokenizer 拡張 (`src/bin/extend_tokenizer.rs` + `CharBpeTokenizer::add_special_token`)
+
+`CharBpeTokenizer` に追加した API:
+- `pub fn add_special_token(&mut self, token: &str) -> usize`: special token を atomic に登録。
+- `pub fn special_tokens(&self) -> &[String]`: 登録 special token の参照。
+- `encode_inner` を修正: テキスト中の `<...>` を **登録 special token と完全一致** したら 1 token として
+  ID 化、 そうでなければ通常 BPE にフォールバック。
+- `encode_long` を修正: 既に先頭が `<BOS>` token のとき auto-prepend を skip (BOS 重複防止)。
+- `Checkpointable::to/from_weight_map`: `special_tokens` の永続化 (旧 cache は fallback)。
+
+拡張後トークナイザ:
+- `tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin`
+- vocab: 8000 → **8010** (+10 special token)
+- 動作確認: `<BOS><AUTHOR=国木田独歩><TITLE>あの時分</TITLE>...` → `[2, 8009, 8000, 5330, 6338, 8001, ...]`
+  (BOS=2, AUTHOR=8009, TITLE=8000, 「あの時分」 BPE = 5330+6338, /TITLE=8001) と完全に special token として認識される
+
+新規テスト (3 ケース、 全 pass):
+- `add_special_token_then_recognize_in_text`
+- `special_tokens_survive_checkpoint_roundtrip`
+- `unregistered_angle_brackets_are_char_encoded`
+- `encode_long_skips_redundant_bos_eos`
 
 ## 5. リスクと判断ポイント
 

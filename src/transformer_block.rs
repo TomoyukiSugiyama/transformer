@@ -1,4 +1,4 @@
-use crate::MultiHeadAttention;
+use crate::multi_head_attention::MultiHeadAttention;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;

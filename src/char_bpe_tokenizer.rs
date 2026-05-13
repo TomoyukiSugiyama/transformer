@@ -28,12 +28,20 @@ use crate::{
 /// vocab レイアウト:
 ///   - id 0..=3: `<PAD>` `<UNK>` `<BOS>` `<EOS>`
 ///   - id 4..: コーパスから収集したユニーク char、 続いて merge で生まれた多 char トークン
+///   - 末尾 (任意): `add_special_token` で追加した user-defined special token (`<AUTHOR=...>` 等)
+///
+/// special token は `encode_inner` で **文字列マッチを最優先** され、 BPE merge を
+/// 経由せずに直接 ID に変換される (Phase 7-1 で導入)。
 pub struct CharBpeTokenizer {
     id_to_token: Vec<String>,
     token_to_id: HashMap<String, usize>,
     merges: Vec<(String, String)>,
     merge_rank: HashMap<(String, String), usize>,
     unk_id: usize,
+    /// **atomic な special token** (PAD/UNK/BOS/EOS + ユーザ追加分) のリスト。
+    /// `encode_inner` でテキスト中の `<...>` 形式マーカを 1 token として認識するために使う。
+    /// 順序保持 (id 順) で、 ASCII '<' で始まり ASCII '>' で終わる前提。
+    special_tokens: Vec<String>,
 }
 
 type Vocab = HashMap<Vec<String>, usize>;
@@ -181,8 +189,10 @@ impl CharBpeTokenizer {
         vocab_size: usize,
     ) -> Self {
         let mut token_to_id: HashMap<String, usize> = HashMap::new();
+        let mut special_tokens: Vec<String> = Vec::new();
         for special in [Self::PAD, Self::UNK, Self::BOS, Self::EOS] {
             token_to_id.insert(special.to_string(), token_to_id.len());
+            special_tokens.push(special.to_string());
         }
 
         // 全 char カバレッジ: coverage_text に出現する全ユニーク char を初期 vocab に登録。
@@ -247,6 +257,7 @@ impl CharBpeTokenizer {
             merges,
             merge_rank,
             unk_id,
+            special_tokens,
         }
     }
 
@@ -271,7 +282,8 @@ impl CharBpeTokenizer {
         symbols
     }
 
-    fn encode_inner(&self, text: &str) -> Vec<usize> {
+    /// Pretokenize → BPE で 1 セグメントを encode する (special token は処理しない)。
+    fn encode_segment(&self, text: &str) -> Vec<usize> {
         let mut ids = Vec::new();
         for word in pretokenize(text) {
             if word.is_empty() {
@@ -284,11 +296,76 @@ impl CharBpeTokenizer {
         ids
     }
 
+    /// テキスト中の special token (`<...>` 形式) を 1 token として認識しつつ、
+    /// それ以外を BPE でエンコードする。
+    ///
+    /// アルゴリズム:
+    /// 1. 次の ASCII '<' を探す
+    /// 2. '<' から '>' までの部分文字列が登録済 special token なら、 直接 ID を出力
+    /// 3. そうでなければ '<' を含むセグメントを通常 BPE でエンコードして 1 char 進める
+    ///
+    /// `<` `>` はいずれも ASCII (1 byte) なので、 byte index での slice は char 境界を破らない。
+    fn encode_inner(&self, text: &str) -> Vec<usize> {
+        if self.special_tokens.is_empty() {
+            return self.encode_segment(text);
+        }
+        let bytes = text.as_bytes();
+        let mut ids = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            // 次の '<' (ASCII 1 byte) を探す。 見つからなければ末尾までを通常 encode。
+            let lt_offset = bytes[cursor..].iter().position(|&b| b == b'<');
+            let Some(lt_rel) = lt_offset else {
+                ids.extend(self.encode_segment(&text[cursor..]));
+                break;
+            };
+            let lt_pos = cursor + lt_rel;
+
+            // '<' から最初の '>' を探す (ASCII 1 byte)。 見つからなければ '<' 以降を通常 encode。
+            let gt_offset = bytes[lt_pos..].iter().position(|&b| b == b'>');
+            let Some(gt_rel) = gt_offset else {
+                ids.extend(self.encode_segment(&text[cursor..]));
+                break;
+            };
+            let gt_pos = lt_pos + gt_rel; // index of '>'
+            let candidate = &text[lt_pos..gt_pos + 1]; // includes '<' and '>'
+
+            if let Some(&id) = self.token_to_id.get(candidate) {
+                if self.special_tokens.iter().any(|s| s == candidate) {
+                    if lt_pos > cursor {
+                        ids.extend(self.encode_segment(&text[cursor..lt_pos]));
+                    }
+                    ids.push(id);
+                    cursor = gt_pos + 1;
+                    continue;
+                }
+            }
+
+            // マッチしなかった: '<' を含む 1 char ぶんを通常 encode して進める。
+            // '<' は ASCII なので lt_pos+1 は char 境界。
+            ids.extend(self.encode_segment(&text[cursor..lt_pos + 1]));
+            cursor = lt_pos + 1;
+        }
+        ids
+    }
+
     /// 学習用: 先頭に BOS、 末尾に EOS を付与する。
+    ///
+    /// Phase 7-1: コーパス側で `<BOS>` `<EOS>` を special token として埋めている場合 (作品単位
+    /// での境界付与) を考慮し、 既に先頭が BOS / 末尾が EOS であれば二重付与しない。
     pub fn encode_long(&self, text: &str) -> Vec<usize> {
-        let mut ids = vec![self.bos_id()];
-        ids.extend(self.encode_inner(text));
-        ids.push(self.eos_id());
+        let inner = self.encode_inner(text);
+        let mut ids = if inner.first().copied() == Some(self.bos_id()) {
+            Vec::with_capacity(inner.len() + 1)
+        } else {
+            let mut v = Vec::with_capacity(inner.len() + 2);
+            v.push(self.bos_id());
+            v
+        };
+        ids.extend(inner);
+        if ids.last().copied() != Some(self.eos_id()) {
+            ids.push(self.eos_id());
+        }
         ids
     }
 
@@ -341,6 +418,7 @@ impl CharBpeTokenizer {
             merges: Vec::new(),
             merge_rank: HashMap::new(),
             unk_id: 0,
+            special_tokens: Vec::new(),
         }
     }
 
@@ -414,6 +492,34 @@ impl CharBpeTokenizer {
         }
     }
 
+    /// **atomic な special token を追加** (Phase 7-1 で導入)。
+    /// 形式は `<...>` を想定: `<AUTHOR=夏目漱石>`、 `<TITLE>`、 `</TITLE>`、 `<DRAMA>` など。
+    /// 既存登録済なら id を返すだけ、 未登録なら新 id を発行して返す。
+    ///
+    /// この token は `encode_inner` で **テキストマッチ最優先** で 1 token として認識される
+    /// (BPE merge を経由しない)。
+    #[allow(dead_code)] // 用途: src/bin/extend_tokenizer.rs (lib 経由のみ参照)
+    pub fn add_special_token(&mut self, token: &str) -> usize {
+        if let Some(&id) = self.token_to_id.get(token) {
+            // 既存だが special_tokens リストに無ければ追加 (旧 cache から load した場合の救済)
+            if !self.special_tokens.iter().any(|s| s == token) {
+                self.special_tokens.push(token.to_string());
+            }
+            return id;
+        }
+        let id = self.id_to_token.len();
+        self.token_to_id.insert(token.to_string(), id);
+        self.id_to_token.push(token.to_string());
+        self.special_tokens.push(token.to_string());
+        id
+    }
+
+    /// 全 special token (PAD/UNK/BOS/EOS + ユーザ追加分) のスライス。
+    #[allow(dead_code)] // 用途: src/bin/extend_tokenizer.rs (lib 経由のみ参照)
+    pub fn special_tokens(&self) -> &[String] {
+        &self.special_tokens
+    }
+
     /// **既存トークナイザの char カバレッジのみ拡張** (merges は変更しない)。
     /// 新規 corpus に既存 vocab にない char が含まれている場合に呼ぶ。
     /// 例: 既存 vocab が現代日本語のみ → 古典文学コーパス追加で `々` `朿` `黌` 等を追加。
@@ -444,6 +550,8 @@ impl Checkpointable for CharBpeTokenizer {
             .collect();
         map.insert_strings("merges", flat_merges);
 
+        // Phase 7-1: special_tokens (atomic な `<...>` 形式トークン) も保存。
+        map.insert_strings("special_tokens", self.special_tokens.clone());
         map
     }
 
@@ -475,11 +583,22 @@ impl Checkpointable for CharBpeTokenizer {
             .map(|(i, pair)| (pair.clone(), i))
             .collect();
 
+        // Phase 7-1: special_tokens を読み込む。 旧 cache (Phase 6 以前) には無いので、
+        // PAD/UNK/BOS/EOS だけが入っているとみなして fallback。
+        let special_tokens: Vec<String> = match map.get_strings("special_tokens") {
+            Ok(v) => v.clone(),
+            Err(_) => [Self::PAD, Self::UNK, Self::BOS, Self::EOS]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+
         self.id_to_token = id_to_token;
         self.token_to_id = token_to_id;
         self.merges = merges;
         self.merge_rank = merge_rank;
         self.unk_id = unk_id;
+        self.special_tokens = special_tokens;
 
         Ok(())
     }
@@ -591,6 +710,83 @@ mod tests {
         // ids[2] が 'x' に対応し、 UNK になる
         let xs: Vec<_> = ids.iter().filter(|&&id| id == unk).collect();
         assert_eq!(xs.len(), 1, "ids={ids:?}");
+    }
+
+    /// Phase 7-1: `add_special_token` で追加した `<...>` 形式トークンが、
+    /// テキスト中で 1 token として認識される (BPE merge を経由しない)。
+    #[test]
+    fn add_special_token_then_recognize_in_text() {
+        let mut t = CharBpeTokenizer::train("夏目漱石は猫である。", 100);
+        let initial_vocab = t.vocab_size();
+        let author_id = t.add_special_token("<AUTHOR=夏目漱石>");
+        let drama_id = t.add_special_token("<DRAMA>");
+        assert_eq!(t.vocab_size(), initial_vocab + 2);
+        assert_eq!(author_id, initial_vocab);
+        assert_eq!(drama_id, initial_vocab + 1);
+        assert!(t.special_tokens().iter().any(|s| s == "<AUTHOR=夏目漱石>"));
+
+        // テキスト中の <AUTHOR=...> は 1 token になる
+        let ids = t.encode_prompt("<AUTHOR=夏目漱石>猫である。");
+        // BOS + <AUTHOR=夏目漱石> + 「猫」「で」「あ」「る」「。」 (BPE merge 次第)
+        assert_eq!(ids[0], t.bos_id());
+        assert_eq!(ids[1], author_id);
+        // 残り (「猫」「で」「あ」「る」「。」) は通常 BPE
+        assert!(ids.len() >= 3, "ids={ids:?}");
+    }
+
+    /// Phase 7-1: special_tokens が checkpoint を経由しても保持される。
+    #[test]
+    fn special_tokens_survive_checkpoint_roundtrip() {
+        let mut original = CharBpeTokenizer::train("吾輩は猫である。", 80);
+        original.add_special_token("<AUTHOR=夏目漱石>");
+        original.add_special_token("<DRAMA>");
+        let map = Tokenizer::to_weight_map(&original);
+
+        let mut restored = CharBpeTokenizer::empty();
+        Checkpointable::from_weight_map(&mut restored, &map).unwrap();
+
+        assert_eq!(restored.vocab_size(), original.vocab_size());
+        assert_eq!(restored.special_tokens().len(), 4 + 2); // PAD/UNK/BOS/EOS + 2 user
+        assert!(restored.special_tokens().iter().any(|s| s == "<AUTHOR=夏目漱石>"));
+
+        // テキスト encode が同じ ID を出すことを確認
+        let sample = "<DRAMA>吾輩は猫である。";
+        assert_eq!(
+            restored.encode_prompt(sample),
+            original.encode_prompt(sample),
+        );
+    }
+
+    /// Phase 7-1: コーパス先頭の `<BOS>` が登録 special token のとき、
+    /// `encode_long` が BOS を重複追加しない。
+    #[test]
+    fn encode_long_skips_redundant_bos_eos() {
+        let t = CharBpeTokenizer::train("吾輩は猫", 80);
+        let bos = t.bos_id();
+        let eos = t.eos_id();
+
+        // ケース 1: 通常の文字列 → 先頭 BOS + 末尾 EOS が自動付与される
+        let ids_plain = t.encode_long("吾輩");
+        assert_eq!(ids_plain.first().copied(), Some(bos));
+        assert_eq!(ids_plain.last().copied(), Some(eos));
+
+        // ケース 2: `<BOS>...<EOS>` 形式の文字列 → 二重付与されない
+        let ids_marked = t.encode_long("<BOS>吾輩<EOS>");
+        let bos_count = ids_marked.iter().filter(|&&i| i == bos).count();
+        let eos_count = ids_marked.iter().filter(|&&i| i == eos).count();
+        assert_eq!(bos_count, 1, "BOS should appear exactly once: ids={ids_marked:?}");
+        assert_eq!(eos_count, 1, "EOS should appear exactly once: ids={ids_marked:?}");
+    }
+
+    /// Phase 7-1: special_tokens が登録されていない `<...>` はそのまま char-level に分解される
+    /// (= ラショナルなフォールバック)。
+    #[test]
+    fn unregistered_angle_brackets_are_char_encoded() {
+        let mut t = CharBpeTokenizer::train("a<b>c<d>e", 50);
+        // <b> や <d> は special_tokens に登録していない
+        let ids = t.encode_prompt("a<b>c");
+        let decoded = t.decode(&ids);
+        assert_eq!(decoded, "a<b>c");
     }
 
     /// 改行・空白・全角句読点が独立トークンとして保持される。
