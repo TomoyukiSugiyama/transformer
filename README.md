@@ -108,6 +108,7 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 | [docs/phase5.md](docs/phase5.md) | Phase 5: 生成品質向上計画 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大) |
 | [docs/phase6.md](docs/phase6.md) | Phase 6: トークナイザ刷新 (char → Unicode char-level BPE)。 **6-a (max=512, BPC 3.76) と 6-d (max=1024 + WSD, BPC 3.74) の完走結果** |
 | [docs/phase7.md](docs/phase7.md) | Phase 7-1: コーパス前処理 + 作家・戯曲 special token (戯曲記号混入 / 作家ヘッダ生成 / 章番号擾乱の構造的解決)。 Phase 7-a 学習設定 |
+| [docs/phase8.md](docs/phase8.md) | Phase 8: 大規模コーパス + Tokenizer 拡大 + モデル拡大。 **8-1 [A][B] (Wikipedia 日本語版 974.7M char 取得 + クレンジング) 完了**。 [C][D][E] (混合 / vocab 32K / 学習起動) は計画中 |
 | [docs/sota_comparison.md](docs/sota_comparison.md) | SoTA LLM (LLaMA 3 / Claude / Gemini / DeepSeek) との要素別比較・本実装の立ち位置 |
 | [docs/kv_cache.md](docs/kv_cache.md) | KV cache の実装解説 (per-token 計算量を `O(n²·d) → O(n·d)` に削減) |
 | [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase 6/7 進捗・ Flash Attention・ OpenBLAS 等) |
