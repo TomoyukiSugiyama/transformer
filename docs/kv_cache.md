@@ -145,24 +145,28 @@ with-cache が n に依存しないということは、 4 ms は以下の **n �
 |-----|------|
 | 短文生成 (max_new ≤ 100) | 4-5x で十分実用的、 そのまま使う |
 | 中長文生成 (max_new = 200-400) | 6-11x、 体感で大幅な改善 |
-| 長文生成 (max_new ≥ 800) | 18x+ 期待、 Phase 6 最適化なしでも十分 |
+| 長文生成 (max_new ≥ 800) | 18x+ 期待、 追加最適化なしでも十分 |
 | max_len ぎりぎりの生成 | sliding window 未実装なので注意 (early-stop) |
 
-### 残り最適化候補 (Phase 6 で着手予定、 4.71x → 20-30x の見込み)
+### 残り最適化候補 (KV-cache 第 2 弾、 4.71x → 20-30x の見込み)
 
 > 4.71x は max_new=100 で per-prompt 1.4 秒短縮 = 実用上十分な改善。
 > 追加最適化は 「将来推論速度が再びボトルネックになった時」 に着手する。
+> ※「Phase 6」 という名称は **モデル訓練フェーズ** と衝突するため (現行 Phase 6 は CharBPE 化)、
+>   ここでは番号を外して 「KV-cache 第 2 弾」 と呼ぶことに改めた。
 
 優先度を **再推定後のボトルネック順** に並べ直すと:
 
-1. ★ **Norm / FFN に `forward_one(&[f32]) -> Vec<f32>`** 最優先  
-   `Vec<Vec<f32>>` ⇄ `Matrix` 変換を完全に回避。 ボトルネック #1 を直撃する。
+1. ★ **Norm / FFN に `forward_one(&[f32]) -> Vec<f32>`**  
+   `Vec<Vec<f32>>` ⇄ `Matrix` 変換を完全に回避。 ※ Phase 7-2 (Matrix API 一本化) で
+   forward は完全 Matrix 化済みなので、 残るのは単一 token 用の専用パスの追加。
 2. **`KvCache` を pre-allocated buffer 化**: append が末尾追記だけに (memcpy 不要)
 3. **per-head attention を BLAS 化** (`(1, d_h) × (d_h, n)`)
-4. **QKV projection 融合**: `(1, d) × (d, 3d)` の 1 matmul (副次効果)
+4. **QKV projection 融合**: `(1, d) × (d, 3d)` の 1 matmul ※ Phase 7-1 で **学習側は実装済**
+   (`MultiHeadAttention::forward`)、 推論 `forward_step` も同様に融合済 (Phase 7-2)
 5. **prefill を 1 回の forward で**: 短プロンプト (10 token 以下) ではほぼ無視可
 
-これらは [`roadmap.md`](roadmap.md) の Phase 6 候補として保留。
+これらは [`roadmap.md`](roadmap.md) で「KV-cache 追加最適化」として保留。
 
 ## 正当性検証
 

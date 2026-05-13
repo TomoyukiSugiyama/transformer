@@ -56,9 +56,9 @@ Pre-Norm は Post-Norm に比べて **大規模モデルでの学習が安定** 
 4. **Forward + Backward** ([`language_model.rs`](src/language_model.rs)): 逆伝播はチェーンルールで自前実装、 中間値をキャッシュして高速化
 5. **Gradient Clip (norm=1.0)**: 勾配爆発を防ぐ
 6. **AdamW Step** ([`adam_w.rs`](src/adam_w.rs)): m, v の 1 次/2 次モーメント + weight decay (decoupled)
-7. **LR Schedule** ([`lr_scheduler.rs`](src/lr_scheduler.rs)): warmup (線形) + cosine decay
+7. **LR Schedule** ([`lr_scheduler.rs`](src/lr_scheduler.rs)): **warmup + cosine decay** または **WSD (Warmup-Stable-Decay)** から選択 (Phase 6-d/7-a で WSD 採用、 MiniCPM/DeepSeek 慣例)
 8. **EMA Loss Logging**: CSV 形式で標準出力に流す ([`docs/tuning.md#ログの読み方`](docs/tuning.md#ログの読み方))
-9. **Val Loss (定期)** ([`eval.rs`](src/eval.rs)): `val_every` step ごとにランダム窓 N 個で計測、 perplexity 算出
+9. **Val Loss + BPC (定期)** ([`eval.rs`](src/eval.rs)): `val_every` step ごとにランダム窓 N 個で計測、 perplexity と BPC (bits per character) を算出
 10. **Checkpoint 保存** ([`checkpoint.rs`](src/checkpoint.rs)): `best.bin` (val 最良) + `latest.bin` (直近)
 
 損失は **クロスエントロピー (PAD は除外)** ([`cross_entropy_loss.rs`](src/cross_entropy_loss.rs))、 オプティマイザは AdamW 固定 (β1=0.9, β2=0.99 推奨)。
@@ -74,9 +74,9 @@ LR スケジューラと AdamW の数式・実装値は [`docs/tuning.md`](docs/
 |------|------|----------|----------------|------------|---------|
 | **CharTokenizer** ([`char_tokenizer.rs`](src/char_tokenizer.rs)) | 1 Unicode char | ✅ | ✅ | ❌ | ❌ |
 | **BpeTokenizer** ([`bpe_tokenizer.rs`](src/bpe_tokenizer.rs)) | byte-level BPE subword | ❌ (UTF-8 境界跨ぎ) | ❌ | ✅ | ❌ |
-| **CharBpeTokenizer** ⭐ ([`char_bpe_tokenizer.rs`](src/char_bpe_tokenizer.rs)) | **Unicode char-level BPE** | ✅ | ✅ | ✅ | ✅ (`extend_merges` / `extend_coverage`) |
+| **CharBpeTokenizer** ⭐ ([`char_bpe_tokenizer.rs`](src/char_bpe_tokenizer.rs)) | **Unicode char-level BPE** | ✅ | ✅ | ✅ | ✅ (`extend_merges` / `extend_coverage` / `add_special_token`) |
 
-CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスでの圧縮率と長文コンテキストを両立する。 SentencePiece と同方針で `</w>` マーカーは持たず、 空白も独立トークンとして保持するため decode は完全に lossless。 詳細は [docs/phase6.md](docs/phase6.md) を参照。
+CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスでの圧縮率と長文コンテキストを両立する。 SentencePiece と同方針で `</w>` マーカーは持たず、 空白も独立トークンとして保持するため decode は完全に lossless。 **Phase 7-1** で `add_special_token` API を追加し、 `<AUTHOR=...>` `<TITLE>` `<DRAMA>` 等の atomic トークンを BPE と独立に扱える (`<...>` 内が登録 special token と完全一致した場合のみ 1 token に。 詳細は [docs/phase7.md](docs/phase7.md))。 全体の設計と Phase 6-a/6-d の結果は [docs/phase6.md](docs/phase6.md) を参照。
 
 ### 推論パイプライン (KV Cache)
 
@@ -99,17 +99,18 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 
 | ドキュメント | 内容 |
 |------------|------|
-| [docs/performance.md](docs/performance.md) | 並列化と性能 (rayon / matrixmultiply / Apple Accelerate のベンチマーク、 `Matrix` 設計) |
+| [docs/performance.md](docs/performance.md) | 並列化と性能 (rayon / matrixmultiply / Apple Accelerate ベンチ、 `Matrix` 設計、 **Phase 7-1〜7-4 の累積 1.59x 高速化** = transpose 排除 + fused matmul-add + 一時バッファ削減) |
 | [docs/tuning.md](docs/tuning.md) | チューニングのコツ (学習率・ミニバッチ・過学習・推論サンプリング) と CSV ログの読み方 |
 | [docs/phase2.md](docs/phase2.md) | Phase 2: Tiny Shakespeare (BPE 4k, d_model=256) ベスト推論サンプル |
 | [docs/phase3.md](docs/phase3.md) | Phase 3: nanoGPT 等価設定 (char 65, d_model=384) との直接比較・val_loss で 3.4% 上回る |
 | [docs/phase4.md](docs/phase4.md) | Phase 4: 青空文庫 / 漱石 7 作品 (char) への拡張・容量律速の観察 |
 | [docs/phase_d.md](docs/phase_d.md) | Phase D: モダンアーキテクチャ導入 (RMSNorm + SwiGLU + RoPE、 累積で val_ppl -1.5% / 学習時間 -41%) |
 | [docs/phase5.md](docs/phase5.md) | Phase 5: 生成品質向上計画 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大) |
-| [docs/phase6.md](docs/phase6.md) | Phase 6: トークナイザ刷新 (char → Unicode char-level BPE) |
+| [docs/phase6.md](docs/phase6.md) | Phase 6: トークナイザ刷新 (char → Unicode char-level BPE)。 **6-a (max=512, BPC 3.76) と 6-d (max=1024 + WSD, BPC 3.74) の完走結果** |
+| [docs/phase7.md](docs/phase7.md) | Phase 7-1: コーパス前処理 + 作家・戯曲 special token (戯曲記号混入 / 作家ヘッダ生成 / 章番号擾乱の構造的解決)。 Phase 7-a 学習設定 |
 | [docs/sota_comparison.md](docs/sota_comparison.md) | SoTA LLM (LLaMA 3 / Claude / Gemini / DeepSeek) との要素別比較・本実装の立ち位置 |
 | [docs/kv_cache.md](docs/kv_cache.md) | KV cache の実装解説 (per-token 計算量を `O(n²·d) → O(n·d)` に削減) |
-| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase 5 進捗 / FlashAttention / OpenBLAS 等) |
+| [docs/roadmap.md](docs/roadmap.md) | 今後の改善案 (Phase 6/7 進捗・ Flash Attention・ OpenBLAS 等) |
 
 ## 依存
 
@@ -140,17 +141,28 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 # 含まれる作品: 吾輩は猫である / 坊っちゃん / 草枕 / 三四郎 / 行人 / こころ / 道草
 # (全て新字新仮名のみ。 「それから」「門」 は仮名遣いが異なるため除外)
 
-# 明治-大正の主要 6 作家 (826 万 char ≈ 24.5 MB UTF-8, 日本語) — Phase 5-3 用
+# 明治-大正の主要 6 作家 (826 万 char ≈ 24.5 MB UTF-8, 日本語) — Phase 5-3 / 5-4 / 6 用
 ./scripts/download_aozora_meiji_taisho.sh
 # → corpus/aozora_meiji_taisho.txt
 # 含まれる作家: 夏目漱石 / 太宰治 / 森鴎外 / 宮沢賢治 / 中島敦 / 国木田独歩
-# 全て新字新仮名、 490 作品取得、 ユニーク文字数 5,220
+# 全て新字新仮名、 504 作品取得、 ユニーク文字数 5,220
 # (芥川は旧字旧仮名のみ公開のため除外)
 ```
 
 青空文庫系のスクリプトは Shift-JIS zip から UTF-8 に変換し、
 ルビ (`《...》`)・ 編集注記 (`［＃...］`)・ 底本情報を除去した本文を出力する
 (python3 が必要)。
+
+#### 派生コーパス (Phase 7-1 / `src/bin/clean_aozora_corpus.rs`)
+
+```bash
+# Phase 7-a 用 v2 コーパス (生成: cargo run --release --bin clean_aozora_corpus)
+# 旧 ===== 作家『タイトル』 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
+# 戯曲フォーマット 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1131 行を削除。
+# → corpus/aozora_meiji_taisho_v2.txt (504 作品、 ~8.28M char)
+```
+
+詳細は [docs/phase7.md](docs/phase7.md) を参照。
 
 ### 学習
 
@@ -226,7 +238,8 @@ optimizer 状態は不要 (`best.bin` または `inference.bin` のどちらで�
 | `feed_forward_kind` | `FeedForwardKind::Gelu` / `SwiGlu` の切替 (Phase D-3 で追加) |
 | `positional_encoding_kind` | `PositionalEncodingKind::Sinusoidal` / `Rope` の切替 (Phase D-2 で追加) |
 | `dropout` / `weight_decay` / `beta2` | 正則化・最適化のハイパラ |
-| `lr_max` / `lr_min` / `warmup_steps` | 学習率スケジュール（warmup + cosine decay） |
+| `lr_max` / `lr_min` / `warmup_steps` | 学習率の上下限と warmup 長 |
+| `lr_schedule_kind` | `LrScheduleKind::WarmupCosine` (古典) / `WarmupStableDecay { stable_steps }` (WSD、 Phase 6-d 以降) の切替 |
 | `end_step` | 総学習ステップ数 |
 | `batch_size` | ミニバッチサイズ |
 | `save_every` / `log_every` | checkpoint 保存・ログ出力間隔 |
@@ -239,10 +252,11 @@ optimizer 状態は不要 (`best.bin` または `inference.bin` のどちらで�
 ```
 src/
 ├── main.rs                    # エントリ・学習ループ・Config (corpus 別プリセット)
-├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate / val 用 forward_loss
+├── lib.rs                     # 全モジュールを公開する library entry (src/bin/* のユーティリティから利用)
+├── language_model.rs          # モデル全体（埋め込み→Transformer→出力）+ generate / val 用 forward_loss + bench
 ├── transformer.rs             # Transformer (block の積み重ね、 final_norm 含む)
 ├── transformer_block.rs       # 1 ブロック (MHA + Norm + FFN + Norm + Dropout × 2)
-├── multi_head_attention.rs    # マルチヘッドアテンション (RoPE 統合済)
+├── multi_head_attention.rs    # マルチヘッドアテンション (RoPE 統合済、 W_QKV 融合 ※Phase 7-1)
 ├── feed_forward.rs            # FeedForward trait + FeedForwardKind enum (Gelu / SwiGlu 切替)
 ├── feed_forward_network.rs    # 位置ごとの FFN (Linear → GELU → Linear)
 ├── swiglu_feed_forward_network.rs  # SwiGLU FFN (gate/up/down 3 行列、 LLaMA 流) ※Phase D-3 で組込済
@@ -254,43 +268,57 @@ src/
 ├── dropout.rs                 # Inverted dropout (training / eval 切替)
 ├── embedding.rs               # トークン埋め込み
 ├── sinusoidal_pe.rs           # 正弦波位置エンコーディング
-├── output_head.rs             # 語彙への射影
+├── output_head.rs             # 語彙への射影 + top-k / top-p / greedy sampling
 ├── adam_w.rs                  # AdamW オプティマイザ (weight decay / β2 設定可)
-├── lr_scheduler.rs            # warmup + cosine スケジューラ
+├── lr_scheduler.rs            # warmup + cosine / WSD (Warmup-Stable-Decay) スケジューラ ※WSD は Phase 7 で追加
 ├── cross_entropy_loss.rs      # 系列全体のクロスエントロピー損失 (PAD は loss から除外)
 ├── tokenizer.rs               # Tokenizer trait と TokenizerKind enum (Char / BPE / CharBPE の切替)
 ├── bpe_tokenizer.rs           # BPE トークナイザ (byte-level + 句読点 split、 英語向け)
 ├── char_tokenizer.rs          # 文字単位トークナイザ (vocab はコーパス文字種から自動生成)
-├── char_bpe_tokenizer.rs      # Unicode char-level BPE (日本語向け、 lossless decode) ※Phase 6 で組込済
+├── char_bpe_tokenizer.rs      # Unicode char-level BPE (日本語向け、 lossless decode + add_special_token) ※Phase 6/7-1 で組込済
 ├── kv_cache.rs                # KV キャッシュ (per-layer K/V を保持、 推論を O(n²d)→O(nd) に削減)
-├── eval.rs                    # 学習中の val_loss 計測 (90/10 split + ランダム窓)
+├── eval.rs                    # 学習中の val_loss / val_ppl / BPC 計測 (90/10 split + ランダム窓)
 ├── checkpoint.rs              # 重み・状態の保存/読込
-└── matrix.rs                  # 行優先 flat 表現の `Matrix` と並列化された行列演算
+├── matrix.rs                  # 行優先 flat 表現の `Matrix` と BLAS / matrixmultiply による行列演算
+│                              # ※Phase 7-3/7-4 で matmul_t1/t2 (transpose 排除)、
+│                              #   matmul_*_add_into (fused matmul-add、 BLAS beta=1) を追加
+└── bin/                       # CLI ユーティリティ (`cargo run --release --bin <name>` で実行)
+    ├── analyze_corpus.rs      # コーパス分析 (作家ヘッダ / 戯曲行 / 章番号 等を統計化) ※Phase 7-1
+    ├── clean_aozora_corpus.rs # 旧コーパス → v2 形式に変換 (special token + 戯曲ラップ + 章番号削除) ※Phase 7-1
+    └── extend_tokenizer.rs    # 既存 CharBPE cache に special token を追加 ※Phase 7-1
 
 scripts/
 ├── download_tiny_shakespeare.sh    # Karpathy char-rnn から取得
 ├── download_aozora_kokoro.sh       # 青空文庫「こころ」 → UTF-8 + ルビ除去 (要 python3)
 ├── download_aozora_soseki_works.sh # 漱石主要長編 7 作品を連結 (要 python3)
-└── download_aozora_meiji_taisho.sh # 明治-大正 6 作家 505 作品を一括取得 (CSV駆動、 要 python3)
+└── download_aozora_meiji_taisho.sh # 明治-大正 6 作家 504 作品を一括取得 (CSV駆動、 要 python3)
 
 corpus/                             # gitignore (各種スクリプトで再生成可能)
 ├── tiny_shakespeare.txt            # Phase 2 / 3 用 (英語 1.1 MB, ~330k token)
 ├── aozora_kokoro.txt               # Phase 4a 用 (日本語 484 KB, ~162k char)
 ├── aozora_soseki_works.txt         # Phase 4b 用 (日本語 3.5 MB, ~1.21M char)
-└── aozora_meiji_taisho.txt         # Phase 5-3 / 5-4 用 (日本語 24.5 MB, 826 万 char, 490 作品)
+├── aozora_meiji_taisho.txt         # Phase 5-3 / 5-4 / 6 用 (日本語 24.5 MB, 826 万 char, 504 作品)
+└── aozora_meiji_taisho_v2.txt      # Phase 7-a 用 (上記をクレンジング: ===== ヘッダ → special token、
+                                    # 戯曲 8 作品を <DRAMA>...</DRAMA> で wrap、 章番号 1131 行削除)
+
+tokenizers/                         # gitignore (CharBPE 訓練時に生成・キャッシュ)
+├── charbpe_v8000_aozora_meiji_taisho_s500000.bin        # Phase 6-a/6-c/6-d 用 (vocab 8000)
+├── charbpe_v16000_aozora_meiji_taisho_s1000000.bin      # Phase 6-b で訓練 (圧縮率不足で中断)
+└── charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin     # Phase 7-a 用 (vocab 8010 = 8000 + 10 special token)
 
 logs/                              # gitignore (学習ログの保存先)
 └── <run_name>.log
 
 docs/                              # 詳細ドキュメント (本 README からリンク)
-├── performance.md                 # 並列化と性能ベンチマーク
+├── performance.md                 # 並列化と性能ベンチマーク + Phase 7-1〜7-4 の累積 1.59x 高速化
 ├── tuning.md                      # チューニングのコツ + ログ仕様
 ├── phase2.md                      # Tiny Shakespeare 推論サンプル
 ├── phase3.md                      # nanoGPT との比較
 ├── phase4.md                      # 日本語コーパスへの拡張
 ├── phase_d.md                     # モダンアーキテクチャ導入 (D-1 RMSNorm + D-3 SwiGLU + D-2 RoPE 完了)
 ├── phase5.md                      # 生成品質向上 (top-p / max_len 拡張 / コーパス拡大 / モデル拡大)
-├── phase6.md                      # トークナイザ刷新 (char → Unicode char-level BPE)
+├── phase6.md                      # トークナイザ刷新 (Phase 6-a / 6-d 完走結果)
+├── phase7.md                      # コーパス前処理 + 作家・戯曲 special token (Phase 7-1) + Phase 7-a 設定
 ├── roadmap.md                     # 今後の改善案
 ├── kv_cache.md                    # KV cache の実装解説
 ├── sota_comparison.md             # SoTA LLM との要素別比較

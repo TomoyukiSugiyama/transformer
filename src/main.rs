@@ -595,19 +595,23 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-3 高速化バイナリ**。
+    // Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-4 高速化バイナリ**。
     //   - corpus: corpus/aozora_meiji_taisho_v2.txt (504 作品、 旧 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
     //             戯曲 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1131 行を削除)
     //   - tokenizer: tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin (8000 + 10 special token)
     //   - LR: WSD (warmup=300, stable=2160, decay=540) — Phase 6-d と同
-    //   - 高速化: Phase 7-3 (matmul_t1/t2 で transpose materialize 排除、 1.12x speedup vs 7-2)
-    //   期待: total ~6 h、 BPC 4.24 → 3.9-4.0 (-5〜-8%)、 戯曲混入と作家ミックスの解消。
+    //   - 高速化: Phase 7-3 (matmul_t1/t2 で transpose materialize 排除、 1.12x vs 7-2)
+    //            + Phase 7-4 (fused matmul-add + scores.clone 削除 + softmax backward in-place、 1.43x vs 7-3)
+    //            累積 1.59x vs 7-2、 Phase 6-d 実測 ~9,200 ms/step → ~5,800 ms/step 想定
+    //   期待: total ~5 h、 BPC 4.22 → 3.9-4.1 (-3〜-7%)、 戯曲混入と作家ミックスとヘッダ生成の構造的解消。
     let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
     training_and_inference(&cfg);
 
-    // Phase 6-d: Phase 6-c と同形状 + WSD scheduler + Phase 7 (Matrix 直叩き + QKV 融合) 高速化。 ✅ 完了
-    //   best val_loss ?? @ step 2000, val_ppl 72.86, BPC 4.24
-    //   推論サンプルでは戯曲混入 (「ハムレット」「王妃」)、 作家ミックス (「カムパネルラ」 漱石プロンプト) が観察 → Phase 7-a に進む
+    // Phase 6-d: Phase 6-c と同形状 + WSD scheduler + Phase 7-1/7-2 (Matrix 直叩き + QKV 融合) 高速化。 ✅ 完了
+    //   best val_loss 4.274018 @ step 2800, val_ppl 71.81, bpc 4.22 (val 基準) / 3.74 (full-corpus 基準)
+    //   total 27,642 s ≒ 7h 41min、 per-step ~9,200 ms (Phase 7-3/7-4 は起動より後に完了したため未適用)
+    //   Phase 6-a (BPC 3.76) 比 -0.6% の微改善。 max_len 倍増 + WSD の効果は限定的。
+    //   推論サンプルでは戯曲混入 (「シロオテ」「お早うございます」) が依然観察 → Phase 7-a に進む
     // let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd();
     // inference_from_checkpoint(
     //     &cfg,

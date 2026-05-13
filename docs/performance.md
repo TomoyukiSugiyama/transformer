@@ -204,8 +204,10 @@ per-token 推論で発生していた jagged ↔ Matrix 変換 (3 ペア × n_la
 - **dead-code 警告 14 → 0** (本物の警告が埋もれない)
 - **LOC -300〜-500 行** (重複 API 削除)
 - **KV-cache 推論側も Matrix 直叩き化** = per-token 1 行ぶんの jagged ↔ Matrix 変換が消える
-  (推論速度改善効果は数 % 程度を予想、 実測は Phase 6-d 完走後)
 - **API 一本化** = 新メソッド追加時に「`_matrix` 付ける?」の判断不要
+
+Phase 6-d 完走 (Phase 7-1/7-2 バイナリで run) の実測は per-step **8,900-9,300 ms (steady)**、 total **7h 41min**。
+Phase 7-3/7-4 の効果はこのフェーズには未適用 (起動より後に完了したため)。 Phase 7-a 以降で初めて適用される。
 
 ### Phase 7-3: 転置行列 materialize の排除 (✅ 完了)
 
@@ -257,20 +259,111 @@ bench (`bench_phase7_step_time`, batch=2, max_len=1024) 実測:
 | Phase 7-2 (transpose 残存) | ~1500 ms | 1.00x |
 | **Phase 7-3 (transpose 排除)** | **~1352 ms** (3 run avg: 1336/1339/1381) | **1.10-1.12x** |
 
-実訓練 (batch=16) 換算では Phase 7-2 ~9000 ms → Phase 7-3 ~8100 ms (10% 短縮、 6-d の
-6.4 h → ~5.7 h を期待)。
+実訓練 (batch=16) 換算では Phase 7-2 ~9,000 ms → Phase 7-3 ~8,100 ms (10% 短縮)。
+**Phase 6-d 起動より Phase 7-3 完了が後だったため、 Phase 6-d はこの効果を享受していない**
+(Phase 6-d 実測 ~9,200 ms = Phase 7-2 性能のまま)。 Phase 7-a 以降で適用予定。
 
 副次効果として **per-step メモリアロケが ~50-100 MB 減少** (transpose 用一時バッファ消滅) し、
 GC/malloc 圧も軽くなる。
 
+### Phase 7-4: fused matmul-add + 一時バッファ削減 (✅ 完了)
+
+backward の **勾配累積** と attention 周辺の **per-step アロケーション** を削減する施策をまとめて投入。
+**1352 ms → 945 ms (1.43x speedup vs Phase 7-3)** を達成。
+
+#### 1. 問題
+
+Phase 7-3 までで transpose は排除したが、 forward/backward 1 step ごとに数百 MB の一時バッファが
+依然として再アロケされていた:
+
+| 一時バッファ | サイズ (Phase 6-d 形状) | 個数 | 合計 |
+|-------------|------------------------|------|-----|
+| `attention_weights` の clone (softmax 直後) | seq² = 4 MB | 8 head × 6 layer | 192 MB |
+| `g_w_qkv = cache_x^T @ dl_dqkv` の temp | d × 3d = 3 MB | 6 layer | 18 MB |
+| `g_w_o = cache_concat^T @ dl_dout` の temp | d² = 1 MB | 6 layer | 6 MB |
+| FFN/SwiGLU の `g_w*` temp (5 種) | d × d_ff 系 | 6 layer | 36 MB |
+| `dl_ds = Matrix::zeros(seq, seq)` (per-head) | seq² = 4 MB | 8 head × 6 layer | 192 MB |
+| **合計 (1 sample, 1 backward)** | | | **~440 MB** |
+
+各 temp は **alloc → matmul → add_in_place で 2 回スイープ** という非効率な経路だった。
+
+#### 2. 対応
+
+##### 2-A. `Matrix` の API 拡張
+
+```rust
+// 既存 buffer に書き込む _into 系
+pub fn matmul_into          (&self, other, out: &mut Matrix);
+pub fn matmul_t1_into       (&self, other, out: &mut Matrix);  // self^T @ other
+pub fn matmul_t2_into       (&self, other, out: &mut Matrix);  // self @ other^T
+
+// **fused matmul-add** (BLAS の beta=1 経路): out += self @ other
+pub fn matmul_add_into      (&self, other, out: &mut Matrix);
+pub fn matmul_t1_add_into   (&self, other, out: &mut Matrix);
+pub fn matmul_t2_add_into   (&self, other, out: &mut Matrix);
+
+// 既存 buffer に転置/分割/結合
+pub fn transpose_into       (&self, out: &mut Matrix);
+pub fn split_columns_into   (&self, out: &mut [Matrix]);
+pub fn concat_columns_into  (parts: &[&Matrix], out: &mut Matrix);
+pub fn ensure_shape         (&mut self, rows, cols);
+```
+
+内部の `sgemm_general` を `(alpha, beta)` を取る形に汎化。 `beta=1.0` を渡すと
+**BLAS が出力に直接加算** するので、 「temp 確保 → matmul → add_in_place」 の 3 ステップが
+1 sgemm に圧縮される (ピークメモリも下がる)。
+
+##### 2-B. 適用箇所 (10 パターン)
+
+| ファイル | 旧コード | 新コード |
+|---------|---------|---------|
+| `multi_head_attention.rs` | `g = cache.matmul_t1(dl_dout); grad.add_in_place(&g);` (W_O, W_QKV) | `cache.matmul_t1_add_into(dl_dout, &mut grad);` |
+| `feed_forward_network.rs` | 同 (W2, W1) | 同 |
+| `swiglu_feed_forward_network.rs` | 同 (W_down, W_gate, W_up) + `dl_dx_gate alloc + dl_dx_up alloc + add_in_place` | `matmul_t1_add_into` ×3 + `matmul_t2(...)` + `matmul_t2_add_into(...)` |
+| `output_head.rs` | 同 (W) | 同 |
+
+##### 2-C. その他の hot path 改善
+
+1. **`scaled_dot_product_attention` の `scores.clone()` を排除**:
+   `scores` は softmax 後に一度しか参照されないので、 そのまま `attention_weights` として返す。
+   `4 MB × 8 head × 6 layer = 192 MB` のアロケが消える。
+
+2. **softmax backward を in-place 化**:
+   `dl_dS = (P ⊙ (dl_dP - rowsum(P ⊙ dl_dP))) / √d_k` を **dl_dP の buffer に直接書き戻す**
+   (dot 集約が j 全体で確定してから書き換えるので overlap 安全)。 さらに `/√d_k` も同じループに
+   融合 (旧来の 2 度目の sweep を排除)。 `192 MB` のアロケと per-row sweep が消える。
+
+3. **`split_columns(3)` の clone 排除**: `parts.into_iter()` で move して Q, K, V を取り出す。
+
+#### 3. 効果
+
+bench (`bench_phase7_step_time`, batch=2, max_len=1024, d_model=512, n_layers=6) 実測:
+
+| 段階 | per-step | speedup vs 7-3 |
+|------|---------:|---------------:|
+| Phase 7-3 (transpose 排除) | ~1352 ms | 1.00x |
+| **Phase 7-4 (fused matmul-add)** | **~945 ms** (3 run: 905/951/981) | **1.43x** |
+
+**Phase 6-d (実測 9,200 ms/step @ batch=16, total 7h 41min) のバイナリを Phase 7-4 に置き換えると**
+**~5,800 ms/step、 訓練時間 ~5 h** が期待できる (bench 比較で 7-2 1500ms → 7-4 945ms = 0.63x、
+9,200 × 0.63 ≒ 5,800)。 Phase 7-a (v2 corpus + special token) は Phase 7-4 バイナリで起動するため、
+同形状で初めてこの効果を活用できる。
+
+副次効果:
+- per-step アロケが **~440 MB → ~50 MB** に削減 (~90% reduction)。
+- ピークメモリ削減で OS の page fault / kswapd 負荷も軽くなる。
+- BLAS の beta=1 経路は内部で SIMD vectorize されるため、 add_in_place の手書き並列より高速。
+
 ### 今後 (検討中)
 
 - **B3 Flash Attention 風 (CPU online softmax + matmul 融合)**:
-  attention scores 行列 (`seq² × n_heads × n_layers` = 192 MB @ Phase 6-c) のメモリ I/O を削減。
-  実装難度は中、 期待 1.3-2x (attention 部分のみ)。
-- **アロケーション削減 (Phase 7-4 候補)**: `split_columns` / `concat_columns` の `_into` API
-  と pre-allocated buffer 化で 1.05-1.15x。 残る big alloc は MHA 内の `concat`、 `dl_dqkv` (6MB)、
-  per-head `scores`/`dl_dp`/`dl_ds` (各 4MB × 8 head × 6 layer = 576 MB)。
+  attention scores 行列 (`seq² × n_heads × n_layers` = 192 MB @ Phase 7-a) を **block-tiled** で
+  処理し、 `O(seq²)` のメモリ I/O を削減。 実装難度は中、 期待 1.3-2x (attention 部分のみ)。
+  Phase 7-4 で per-head 4 MB の alloc は in-place 化済みなので、 残る効果は cache locality と
+  FLOPs 削減 (causal mask 部分の skip)。
+- **`fwd_buf_qkv` / `bwd_buf_dl_dqkv` / `bwd_buf_dl_dconcat` 等の MHA 内 buffer 化**:
+  Phase 7-4 で `_into` API は揃ったが、 MHA 内に struct field として buffer を持たせる refactor は
+  未着手。 期待 1.05-1.10x (alloc 削減のみで、 BLAS time は変わらない)。
 - **bf16 mixed precision (Apple BNNS)**: 期待 1.8-2.5x、 実装難度大。 数値安定性試験要。
 - **KvCache の事前確保**: 推論時のみ。 alloc/realloc を削除。
 - **Embedding / SinusoidalPE / Rope の table を Matrix 化**: 残った `Vec<Vec<f32>>` の内部表現。

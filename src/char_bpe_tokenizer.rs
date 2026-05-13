@@ -782,7 +782,7 @@ mod tests {
     /// (= ラショナルなフォールバック)。
     #[test]
     fn unregistered_angle_brackets_are_char_encoded() {
-        let mut t = CharBpeTokenizer::train("a<b>c<d>e", 50);
+        let t = CharBpeTokenizer::train("a<b>c<d>e", 50);
         // <b> や <d> は special_tokens に登録していない
         let ids = t.encode_prompt("a<b>c");
         let decoded = t.decode(&ids);

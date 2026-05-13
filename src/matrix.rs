@@ -163,7 +163,7 @@ impl Matrix {
         let m = self.rows;
         let n = other.cols;
         let mut out = Matrix::zeros(m, n);
-        sgemm_general(self, false, other, false, &mut out);
+        sgemm_general(self, false, other, false, 1.0, 0.0, &mut out);
         out
     }
 
@@ -181,7 +181,7 @@ impl Matrix {
         let m = self.cols; // self^T の行数 = self の列数
         let n = other.cols;
         let mut out = Matrix::zeros(m, n);
-        sgemm_general(self, true, other, false, &mut out);
+        sgemm_general(self, true, other, false, 1.0, 0.0, &mut out);
         out
     }
 
@@ -199,8 +199,164 @@ impl Matrix {
         let m = self.rows;
         let n = other.rows; // other^T の列数 = other の行数
         let mut out = Matrix::zeros(m, n);
-        sgemm_general(self, false, other, true, &mut out);
+        sgemm_general(self, false, other, true, 1.0, 0.0, &mut out);
         out
+    }
+
+    // ---------- Phase 7-4: `_into` 系 API ----------
+    // forward/backward を回すたびに `Matrix::zeros(...)` で何 MB も確保していた箱所を、
+    // 既存 buffer に **直接書き込む** ことで毎ステップのアロケを削減する。
+    // sgemm の場合 BLAS が beta=0 で C 全体を書き換えるので、 buffer の中身は事前ゼロ初期化
+    // 不要 (resize 時に 0 充填されているのでそのまま使える)。
+
+    /// shape を確保し直すユーティリティ。 既存容量で足りる場合は再アロケしない。
+    /// `_into` 系を呼ぶ前に呼んで形を合わせるのに使う。
+    pub fn ensure_shape(&mut self, rows: usize, cols: usize) {
+        let needed = rows * cols;
+        if self.data.len() != needed {
+            self.data.resize(needed, 0.0);
+        }
+        self.rows = rows;
+        self.cols = cols;
+    }
+
+    /// `out = self @ other` を **既存 buffer に書き込む** matmul。
+    /// `out.shape() == (self.rows, other.cols)` であること必須 (満たさない場合 panic)。
+    /// 中身は完全に上書きされるのでゼロ初期化済みである必要はない。
+    pub fn matmul_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.cols, other.rows,
+            "matmul_into shape mismatch: ({}, {}) × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, false, other, false, 1.0, 0.0, out);
+    }
+
+    /// `out = self^T @ other` を既存 buffer に書き込む。
+    pub fn matmul_t1_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.rows, other.rows,
+            "matmul_t1_into shape mismatch: ({}, {})^T × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, true, other, false, 1.0, 0.0, out);
+    }
+
+    /// `out = self @ other^T` を既存 buffer に書き込む。
+    pub fn matmul_t2_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.cols, other.cols,
+            "matmul_t2_into shape mismatch: ({}, {}) × ({}, {})^T",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, false, other, true, 1.0, 0.0, out);
+    }
+
+    /// `out += self @ other` を計算する **fused multiply-add 版**。 BLAS の beta=1 経路で
+    /// 1 度の sgemm に圧縮される (旧来は temp = matmul → add_in_place の 2 段階)。
+    /// 勾配累積 (`grad_w += x^T @ dl_dy`) に最適。
+    pub fn matmul_add_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.cols, other.rows,
+            "matmul_add_into shape mismatch: ({}, {}) × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, false, other, false, 1.0, 1.0, out);
+    }
+
+    /// `out += self^T @ other`
+    pub fn matmul_t1_add_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.rows, other.rows,
+            "matmul_t1_add_into shape mismatch: ({}, {})^T × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, true, other, false, 1.0, 1.0, out);
+    }
+
+    /// `out += self @ other^T`
+    pub fn matmul_t2_add_into(&self, other: &Matrix, out: &mut Matrix) {
+        assert_eq!(
+            self.cols, other.cols,
+            "matmul_t2_add_into shape mismatch: ({}, {}) × ({}, {})^T",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        sgemm_general(self, false, other, true, 1.0, 1.0, out);
+    }
+
+    /// `out = self^T` を既存 buffer に書き込む。 `out.shape() == (self.cols, self.rows)` 必須。
+    pub fn transpose_into(&self, out: &mut Matrix) {
+        let m = self.rows;
+        let n = self.cols;
+        assert_eq!(
+            out.shape(),
+            (n, m),
+            "transpose_into shape mismatch: out={:?} expected ({n}, {m})",
+            out.shape()
+        );
+        out.data
+            .par_chunks_mut(m)
+            .enumerate()
+            .for_each(|(j, out_row)| {
+                for i in 0..m {
+                    out_row[i] = self.data[i * n + j];
+                }
+            });
+    }
+
+    /// `split_columns` の destination 版。 `out.len() == n` (= 分割数) で、
+    /// 各 `out[h]` の shape は `(self.rows, self.cols / n)` でなければならない。
+    /// MHA の split_heads で head 用 buffer を毎回 alloc するのを抑える。
+    pub fn split_columns_into(&self, out: &mut [Matrix]) {
+        let n = out.len();
+        assert!(n > 0, "split_columns_into: empty out");
+        assert!(
+            self.cols % n == 0,
+            "split_columns_into: cols {} not divisible by {}",
+            self.cols,
+            n
+        );
+        let block = self.cols / n;
+        for (h, dst) in out.iter_mut().enumerate() {
+            assert_eq!(
+                dst.shape(),
+                (self.rows, block),
+                "split_columns_into: out[{h}] shape mismatch"
+            );
+            for i in 0..self.rows {
+                let src_start = i * self.cols + h * block;
+                let dst_start = i * block;
+                dst.data[dst_start..dst_start + block]
+                    .copy_from_slice(&self.data[src_start..src_start + block]);
+            }
+        }
+    }
+
+    /// `concat_columns` の destination 版。 `parts.iter()` の shape はすべて等しく、
+    /// `out.shape() == (rows, block * parts.len())` でなければならない。
+    pub fn concat_columns_into(parts: &[&Matrix], out: &mut Matrix) {
+        assert!(!parts.is_empty(), "concat_columns_into: empty parts");
+        let rows = parts[0].rows;
+        let block = parts[0].cols;
+        assert!(
+            parts.iter().all(|p| p.rows == rows && p.cols == block),
+            "concat_columns_into: inconsistent shapes"
+        );
+        let n = parts.len();
+        let cols = block * n;
+        assert_eq!(
+            out.shape(),
+            (rows, cols),
+            "concat_columns_into: out shape mismatch: expected ({rows}, {cols}) got {:?}",
+            out.shape()
+        );
+        for (h, part) in parts.iter().enumerate() {
+            for i in 0..rows {
+                let dst = i * cols + h * block;
+                let src = i * block;
+                out.data[dst..dst + block].copy_from_slice(&part.data[src..src + block]);
+            }
+        }
     }
 
     /// rayon 並列の素朴な i-k-j matmul。 BLAS との数値比較やベンチ用に残してある。
@@ -378,15 +534,24 @@ impl Matrix {
     }
 }
 
-/// `op(A) @ op(B) → C` を計算する内部 sgemm ヘルパ。
+/// `out = alpha * op(A) @ op(B) + beta * out` を計算する内部 sgemm ヘルパ。
 ///
 /// `trans_a` / `trans_b` で各オペランドを転置するかを指定する。 転置は **メタデータだけ** で
 /// 切り替わり、 メモリ上の transpose コピーは発生しない (BLAS の trans フラグを使う)。
+/// `beta=1.0` を指定すれば「既存の out に加算」される (= fused matmul-add で勾配累積に最適)。
 ///
 /// 期待形状:
 /// - `op(A)` = `(m, k)`、 `op(B)` = `(k, n)`、 `out` = `(m, n)`
 /// - row-major 表現
-fn sgemm_general(a: &Matrix, trans_a: bool, b: &Matrix, trans_b: bool, out: &mut Matrix) {
+fn sgemm_general(
+    a: &Matrix,
+    trans_a: bool,
+    b: &Matrix,
+    trans_b: bool,
+    alpha: f32,
+    beta: f32,
+    out: &mut Matrix,
+) {
     let (m, k) = if trans_a {
         (a.cols, a.rows)
     } else {
@@ -432,12 +597,12 @@ fn sgemm_general(a: &Matrix, trans_a: bool, b: &Matrix, trans_b: bool, out: &mut
             m as i32,
             n as i32,
             k as i32,
-            1.0,
+            alpha,
             a.data.as_ptr(),
             lda,
             b.data.as_ptr(),
             ldb,
-            0.0,
+            beta,
             out.data.as_mut_ptr(),
             ldc,
         );
@@ -463,14 +628,14 @@ fn sgemm_general(a: &Matrix, trans_a: bool, b: &Matrix, trans_b: bool, out: &mut
             m,
             k,
             n,
-            1.0,
+            alpha,
             a.data.as_ptr(),
             rsa,
             csa,
             b.data.as_ptr(),
             rsb,
             csb,
-            0.0,
+            beta,
             out.data.as_mut_ptr(),
             n as isize,
             1,
@@ -741,6 +906,137 @@ mod tests {
             let s: f32 = m.row(i).iter().sum();
             assert!((s - 1.0).abs() < 1e-5);
         }
+    }
+
+    /// Phase 7-4: `_into` 系が non-`_into` 版と同じ結果を返すことを確認。
+    #[test]
+    fn matmul_into_matches_matmul() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        let b = Matrix::from_jagged(&[vec![7.0, 8.0], vec![9.0, 10.0], vec![11.0, 12.0]]);
+        let expected = a.matmul(&b);
+        let mut actual = Matrix::zeros(2, 2);
+        a.matmul_into(&b, &mut actual);
+        assert_eq!(actual.to_jagged(), expected.to_jagged());
+    }
+
+    #[test]
+    fn matmul_t1_into_matches_matmul_t1() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]]); // (3, 2)
+        let b = Matrix::from_jagged(&[vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0], vec![13.0, 14.0, 15.0]]); // (3, 3)
+        let expected = a.matmul_t1(&b); // (2, 3)
+        let mut actual = Matrix::zeros(2, 3);
+        a.matmul_t1_into(&b, &mut actual);
+        assert_eq!(actual.to_jagged(), expected.to_jagged());
+    }
+
+    #[test]
+    fn matmul_t2_into_matches_matmul_t2() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]); // (2, 3)
+        let b = Matrix::from_jagged(&[vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0]]); // (2, 3)
+        let expected = a.matmul_t2(&b); // (2, 2)
+        let mut actual = Matrix::zeros(2, 2);
+        a.matmul_t2_into(&b, &mut actual);
+        assert_eq!(actual.to_jagged(), expected.to_jagged());
+    }
+
+    #[test]
+    fn transpose_into_matches_transpose() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        let expected = a.transpose();
+        let mut actual = Matrix::zeros(3, 2);
+        a.transpose_into(&mut actual);
+        assert_eq!(actual.to_jagged(), expected.to_jagged());
+    }
+
+    #[test]
+    fn split_columns_into_matches_split_columns() {
+        let m = Matrix::from_jagged(&[
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        ]);
+        let expected = m.split_columns(3);
+        let mut actual: Vec<Matrix> = (0..3).map(|_| Matrix::zeros(2, 2)).collect();
+        m.split_columns_into(&mut actual);
+        for (e, a) in expected.iter().zip(actual.iter()) {
+            assert_eq!(e.to_jagged(), a.to_jagged());
+        }
+    }
+
+    #[test]
+    fn concat_columns_into_matches_concat_columns() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0], vec![7.0, 8.0]]);
+        let b = Matrix::from_jagged(&[vec![3.0, 4.0], vec![9.0, 10.0]]);
+        let c = Matrix::from_jagged(&[vec![5.0, 6.0], vec![11.0, 12.0]]);
+        let expected = Matrix::concat_columns(&[a.clone(), b.clone(), c.clone()]);
+        let mut actual = Matrix::zeros(2, 6);
+        Matrix::concat_columns_into(&[&a, &b, &c], &mut actual);
+        assert_eq!(actual.to_jagged(), expected.to_jagged());
+    }
+
+    #[test]
+    fn matmul_add_into_accumulates_correctly() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let b = Matrix::from_jagged(&[vec![5.0, 6.0], vec![7.0, 8.0]]);
+        let mut acc = Matrix::from_jagged(&[vec![100.0, 200.0], vec![300.0, 400.0]]);
+        // expected = acc + a @ b
+        let prod = a.matmul(&b);
+        let expected: Vec<f32> = acc
+            .data()
+            .iter()
+            .zip(prod.data().iter())
+            .map(|(x, y)| x + y)
+            .collect();
+        a.matmul_add_into(&b, &mut acc);
+        for (x, y) in acc.data().iter().zip(expected.iter()) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn matmul_t1_add_into_accumulates_correctly() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let b = Matrix::from_jagged(&[vec![5.0, 6.0], vec![7.0, 8.0]]);
+        let mut acc = Matrix::from_jagged(&[vec![10.0, 20.0], vec![30.0, 40.0]]);
+        let prod = a.matmul_t1(&b); // (2, 2)
+        let expected: Vec<f32> = acc
+            .data()
+            .iter()
+            .zip(prod.data().iter())
+            .map(|(x, y)| x + y)
+            .collect();
+        a.matmul_t1_add_into(&b, &mut acc);
+        for (x, y) in acc.data().iter().zip(expected.iter()) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn matmul_t2_add_into_accumulates_correctly() {
+        let a = Matrix::from_jagged(&[vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let b = Matrix::from_jagged(&[vec![5.0, 6.0], vec![7.0, 8.0]]);
+        let mut acc = Matrix::from_jagged(&[vec![10.0, 20.0], vec![30.0, 40.0]]);
+        let prod = a.matmul_t2(&b);
+        let expected: Vec<f32> = acc
+            .data()
+            .iter()
+            .zip(prod.data().iter())
+            .map(|(x, y)| x + y)
+            .collect();
+        a.matmul_t2_add_into(&b, &mut acc);
+        for (x, y) in acc.data().iter().zip(expected.iter()) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn ensure_shape_resizes_correctly() {
+        let mut m = Matrix::zeros(2, 3);
+        m.ensure_shape(4, 5);
+        assert_eq!(m.shape(), (4, 5));
+        assert_eq!(m.data().len(), 20);
+        m.ensure_shape(2, 2);
+        assert_eq!(m.shape(), (2, 2));
+        assert_eq!(m.data().len(), 4);
     }
 
     #[test]

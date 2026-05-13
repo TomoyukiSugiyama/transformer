@@ -245,15 +245,18 @@ best 到達は **step 2400** (中盤)。 以降 train_loss は強く改善 (3.49
 
 ### 全 Phase 累積 BPC 推移
 
-| Phase | コーパス | 構成 | best BPC |
-|-------|--------|------|---------|
-| Phase 4b | 漱石 7 作品 (1.21M char) | d=384 char | ~3.71 |
-| Phase 5-2 | 同上 | d=384 char + RMS+SwiGLU+RoPE | 3.40 |
-| Phase 5-3 | 6 作家 8.3M char | d=384 char | 4.36 |
-| Phase 5-4a | 同上 | d=512 char | 4.18 |
-| **Phase 6-a** | **同上** | **d=512 CharBPE 8K** | **🏆 3.76** |
+> **BPC denominator 注**: 表中は **full-corpus chars/token=1.65 (CharBPE 8K の場合)** を分母にした「論文・他実装と比較しやすい慣例値」。 学習コードが log に出す `bpc=...` は **val 分割の chars/token=1.46** を使うため値が大きくなる。 本表で揃えた数値は Phase 6-a の手計算と同じ式 (= `val_loss / ln(2) × token/char [full corpus]`) で正規化済。
 
-Phase 5-3/5-4 はコーパスが約 7 倍に拡大したため難易度が上がり BPC が悪化していたが、 **Phase 6-a でようやく 8.3M char コーパスで Phase 5-2 (1.21M) の BPC 3.40 に近付いた**。
+| Phase | コーパス | 構成 | best BPC (full-corpus 基準) | val log の bpc 値 (val 基準) |
+|-------|--------|------|----------------------------:|----------------------------:|
+| Phase 4b | 漱石 7 作品 (1.21M char) | d=384 char | ~3.71 | (logging 機能未追加) |
+| Phase 5-2 | 同上 | d=384 char + RMS+SwiGLU+RoPE | 3.40 | (同上) |
+| Phase 5-3 | 6 作家 8.3M char | d=384 char | 4.36 | (同上) |
+| Phase 5-4a | 同上 | d=512 char | 4.18 | (同上) |
+| Phase 6-a | 同上 | d=512 CharBPE 8K, max_len=512 | **3.76** | (logging 機能未追加) |
+| **Phase 6-d** | **同上** | **d=512 CharBPE 8K, max_len=1024 + WSD** | **🏆 3.74** | **4.22** |
+
+Phase 5-3/5-4 はコーパスが約 7 倍に拡大したため難易度が上がり BPC が悪化していたが、 **Phase 6-a/6-d でようやく 8.3M char コーパスで Phase 5-2 (1.21M) の BPC 3.40 に近付いた**。 Phase 6-d は Phase 6-a 比 -0.6% の微改善 (max_len 倍増 + WSD の効果は限定的)。
 
 ### 質的成果 (生成サンプル)
 
@@ -340,7 +343,7 @@ Phase 6-c は step 180 (elapsed 33 min) で per-step ~11,000 ms を確認。 300
 |------|---------|-----|------|
 | 180  | (val 未到達) | — | per-step 10,500-11,500 ms。 中断。 |
 
-## Phase 6-d: WSD + Phase 7 高速化 適用
+## Phase 6-d: WSD + Phase 7 高速化 適用 (✅ 完了)
 
 Phase 6-c と完全に同じ形状を **Phase 7 で高速化したバイナリ + WSD スケジューラ** で再起動する。
 
@@ -348,7 +351,7 @@ Phase 6-c と完全に同じ形状を **Phase 7 で高速化したバイナリ +
 |---------|-----------|--------------|------|
 | 形状 | d=512, n=6, max_len=1024, vocab=8K | 同 | (互換) |
 | LR scheduler | warmup-cosine | **warmup-stable-decay** (warmup=300, stable=2160, decay=540) | 同 BPC を 15-30% 早く到達 (MiniCPM/DeepSeek 慣例) |
-| バイナリ | 旧 (`Vec<Vec<f32>>` API) | **Phase 7** (Matrix 直叩き + QKV 融合) | per-step 1.2-1.4x |
+| バイナリ | 旧 (`Vec<Vec<f32>>` API) | **Phase 7-1/7-2** (Matrix 直叩き + QKV 融合) | per-step 1.2-1.4x |
 | per-step 想定 | ~11,000 ms | **~9,000 ms** | ☆ |
 | 総時間 想定 | ~9.2 h | **~6-7 h** | -25 〜 -30% |
 | Checkpoint 互換 | — | Phase 6-c の best.bin もロード可 (MHA は w_q/w_k/w_v 3 分割を組み立て) | resume 安全 |
@@ -359,15 +362,83 @@ Phase 6-c と完全に同じ形状を **Phase 7 で高速化したバイナリ +
 cargo run --release 2>&1 | tee logs/phase6d_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd.log
 ```
 
-### 観測ポイント
+### 完走結果
 
-- ログヘッダに `lr_schedule=WarmupStableDecay { stable_steps: 2160 }` が出ること
-- 序盤 step 60-100 で per-step 8,500-9,500 ms 程度に収束 (Phase 6-c より明確に短い)
-- step 200 / 400 / 600 の val_ppl と BPC が Phase 6-a (CharBPE 8K, max_len=512) より **同 step で良い** はず (max_len 倍増効果)
-- 終盤 step 2,400+ (decay 開始 = step 2,460 以降) で lr が `1 - sqrt(progress)` で急減し、 finetune 効果で BPC がさらに -1 〜 -2% 改善する想定
+3000 step 完走、 best は **step 2800**:
+
+| step | val_loss | val_ppl | bpc (val 基準) | best |
+|------|---------|---------|---------------:|------|
+| 200 | 5.5377 | 254.09 | 5.4715 | ✅ |
+| 400 | 4.8927 | 133.32 | 4.8342 | ✅ |
+| 600 | 4.5878 | 98.28 | 4.5329 | ✅ |
+| 800 | 4.4879 | 88.93 | 4.4342 | ✅ |
+| 1000 | 4.3853 | 80.26 | 4.3328 | ✅ |
+| 1200 | 4.3409 | 76.77 | 4.2890 | ✅ |
+| 1400 | 4.2999 | 73.69 | 4.2485 | ✅ |
+| 1600 | 4.2953 | 73.36 | 4.2440 | ✅ |
+| 1800 | 4.3135 | 74.70 | 4.2619 | — |
+| 2000 | 4.2886 | 72.86 | 4.2373 | ✅ |
+| 2200 | 4.3118 | 74.57 | 4.2602 | — |
+| 2400 | 4.3129 | 74.65 | 4.2613 | — |
+| 2600 | 4.2861 | 72.68 | 4.2348 | ✅ |
+| **2800** | **4.2740** | **71.81** | **4.2229** | ✅ ⭐ **best** |
+| 3000 | 4.2784 | 72.12 | 4.2272 | — (終端 -0.04% 微悪化) |
+
+総学習時間 = **27,642 s ≒ 7h 41min** (想定 6-7 h より 10〜25% 長め、 Phase 7-3/7-4 高速化が間に合っていなかったため後述)。
+
+### vs Phase 6-a (CharBPE 8K, max_len=512) 比較
+
+**注意: BPC の denominator 不整合**: Phase 6-a の docs に記載の BPC=3.76 は **full-corpus chars/token=1.65** を使った手計算値。 Phase 6-d 以降の log 出力 BPC は **val-only chars/token=1.46** を使う (`src/main.rs` 内の正規実装)。 同一トークナイザ + 同一 val 分割なので val_loss 比較が最も信頼できる。
+
+| 指標 | Phase 6-a (max=512) | Phase 6-d (max=1024 + WSD + Phase 7) | 改善 |
+|------|---------------------|--------------------------------------|-----|
+| best step | 2400 | **2800** (+400 step) | — |
+| best val_loss | 4.2999 | **4.2740** | **-0.6%** |
+| best val_ppl | 73.70 | **71.81** | **-2.6%** |
+| BPC (val 基準で再計算した fair 値) | **4.249** (=4.2999/ln2 × 283359/413749) | **4.2229** (logged) | **-0.6%** |
+| BPC (full-corpus 基準・旧 docs 値) | 3.76 | (3.76 × 4.274/4.300 ≈) **3.74** | **-0.6%** |
+| total time | ~8h 10min (batch=32, max=512) | **7h 41min** (batch=16, max=1024) | **-6%** |
+
+**結論**: Phase 6-d は val_loss / val_ppl / BPC のいずれでも Phase 6-a を **-0.6 〜 -2.6%** 改善したが、 phase6.md/phase7.md で当初期待した **「BPC -2 〜 -5%」** には届かなかった。 想定外に効果が小さかった理由は次節。
+
+### 改善幅が小さかった原因
+
+1. **WSD decay が短い**: stable=2160 + decay=540 (= 2160-2700 step が stable, 2461-3000 が decay)。 best の step 2800 時点で decay は 340 step 経過。 LR が `1-sqrt(progress)` で減るため、 後半の固定 LR 期間と decay 序盤の改善幅が Phase 6-a の cosine 終端と大差なし。 → **decay 比率を 30-40% に増やす** (例: stable=1800, decay=900) で改善余地あり。
+2. **max_len 倍増の波及が薄い**: max_len=1024 にしても batch を 32→16 に落としているので 1 step あたり token 数は同じ (16,384 token)。 長距離依存学習はサンプル長が増えただけでは加速しない (むしろ短コンテキストでも学べる短〜中距離パターンの学習頻度が落ちる)。 → 同 token/step ではなく **token/step も増やす** (batch=24, max=1024 等) のがより自然。
+3. **コーパスは同じ**: 戯曲混入 / 作家ヘッダ / 章番号が依然として混じる corpus で学習しているため、 「真の規則性」 が読み取りにくい。 → **Phase 7-a (v2 corpus + special token)** で抜本対策予定。
+
+### per-step 時間と高速化適用状況
+
+| 区間 | observed per-step | バイナリ世代 |
+|------|------------------:|--------------|
+| step 20-2000 | **~8,900-9,300 ms** (steady) | Phase 7-1/7-2 (Matrix 直叩き + QKV 融合) |
+| step 2200-3000 | ~9,500-11,000 ms (劣化) | 同上、 メモリ圧 (Activity Monitor で確認した swap や別プロセス起動の可能性) |
+
+Phase 7-3 (transpose 排除、 +1.12x) と Phase 7-4 (fused matmul-add、 +1.43x vs 7-3) は **Phase 6-d 起動より後に完了** したため、 Phase 6-d 本体は適用前のバイナリで走った。
+**Phase 7-a 以降は Phase 7-4 バイナリで起動できる**ため、 同形状で per-step **~5,800-6,000 ms** (= 9,200 × 945/1352 → ~6,400 ms 程度)、 総時間 **~5 h** が見込める。
+
+### 推論サンプル品質
+
+step 3000 best.bin で 9 プロンプト × top-k/top-p 推論 (`logs/phase6d_*.log` 末尾)。 Phase 6-a 比で:
+
+| 観点 | Phase 6-a | Phase 6-d (max_len=1024) | 評価 |
+|------|----------|--------------------------|------|
+| 作家文体の使い分け | 「津田/お延」「カムパネルラ/苹果」を再現 | 「ジョバンニ/カムパネルラ」「メロス/シロオテ」「主人/迷亭」が同水準 | ≈ 同等 |
+| 戯曲記号 / 戯曲台詞混入 | 残存 | **「(おとずれて...)」「お早うございます」(シロオテ)** が依然出現 | △ 未解消 (Phase 7-a 課題) |
+| 作家ヘッダ生成 | 一部出現 | 出現頻度低下 (確認サンプル内で観測なし) | ✅ 改善 |
+| 長文 (200 char+) の論理一貫性 | repetition collapse | Phase 6-a より改善 (max_len=1024 効果)、 ただし対話シーンで人称揺れあり | ✅ やや改善 |
+| 章番号「五」「一」 等の擾乱 | 観察あり | 観察なし (Phase 7-1 の章番号削除はまだだが、 元から散文中に埋まる pattern では出ない) | — |
+
+### 次フェーズへの示唆
+
+- **Phase 7-a (v2 corpus + 12 special token)** で戯曲混入とヘッダ生成は構造的に解決見込み。
+- **Phase 7-4 高速化バイナリ**で per-step ~5,800 ms ≒ 総 5 h が見込まれるため、 **end_step=3500-4000 への増量も時間内で可能**。
+- WSD の decay 比率を **stable=1800, decay=1200** 等に振り直して終盤の finetune 効果を厚くする調整も検討対象。
 
 ## 関連ドキュメント
 
 - [Phase 5: 生成品質向上](phase5.md) — 直前のフェーズ。 Phase 5-4a の結果と Phase 6 着手の動機
+- [Phase 7-1: コーパス前処理 + special token](phase7.md) — Phase 6-d 推論で残った課題への対応
+- [Performance (Phase 7 高速化)](performance.md) — Phase 7-1〜7-4 の最適化詳細
 - [Roadmap](roadmap.md) — 全体俯瞰
 - [SoTA 比較](sota_comparison.md) — トークナイザの位置付け (現代 LLM は SentencePiece / BPE が一般的)

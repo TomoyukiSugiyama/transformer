@@ -4,6 +4,7 @@ use std::io::Result;
 
 use rand::RngExt;
 use rand::rng;
+use rayon::prelude::*;
 
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
@@ -130,10 +131,12 @@ impl MultiHeadAttention {
         // Q, K, V を **1 つの matmul に融合**: x @ W_QKV → split。
         // 旧 3 matmul (x @ W_Q, x @ W_K, x @ W_V) より BLAS 効率が良い。
         let qkv = x.matmul(&self.w_qkv);
-        let parts = qkv.split_columns(3); // [Q, K, V] each (seq, d_model)
-        let q = parts[0].clone();
-        let k = parts[1].clone();
-        let v = parts[2].clone();
+        // Phase 7-4: split_columns の戻り Vec を IntoIter で move して .clone() 3 回 (3 × 2 MB)
+        // を排除。
+        let mut parts_iter = qkv.split_columns(3).into_iter();
+        let q = parts_iter.next().unwrap();
+        let k = parts_iter.next().unwrap();
+        let v = parts_iter.next().unwrap();
 
         let mut q_heads = q.split_columns(self.n_heads);
         let mut k_heads = k.split_columns(self.n_heads);
@@ -172,9 +175,9 @@ impl MultiHeadAttention {
 
     pub fn backward(&mut self, dl_dout: &Matrix) -> Matrix {
         // W_O backward
-        // grad_w_o += concat^T @ dl_dout  (Phase 7-3: matmul_t1 で transpose アロケを回避)
-        let g_w_o = self.cache_concat.matmul_t1(dl_dout);
-        self.grad_w_o.add_in_place(&g_w_o);
+        // grad_w_o += concat^T @ dl_dout  (Phase 7-4: fused matmul-add で temp alloc + sweep 圧縮)
+        self.cache_concat
+            .matmul_t1_add_into(dl_dout, &mut self.grad_w_o);
         // dl_dconcat = dl_dout @ W_O^T  (Phase 7-3: matmul_t2 で transpose アロケを回避)
         let dl_dconcat = dl_dout.matmul_t2(&self.w_o);
 
@@ -226,9 +229,9 @@ impl MultiHeadAttention {
         let dl_dqkv = Matrix::concat_columns(&[dl_dq, dl_dk, dl_dv]);
 
         // grad_w_qkv += cache_x^T @ dl_dqkv  shape: (d_model, 3*d_model)
-        // Phase 7-3: matmul_t1 で cache_x の transpose を materialize しない
-        let g_w_qkv = self.cache_x.matmul_t1(&dl_dqkv);
-        self.grad_w_qkv.add_in_place(&g_w_qkv);
+        // Phase 7-4: fused matmul-add で d_model × 3*d_model の temp + sweep を 1 sgemm に圧縮。
+        self.cache_x
+            .matmul_t1_add_into(&dl_dqkv, &mut self.grad_w_qkv);
 
         // dl_dx = dl_dqkv @ W_QKV^T  shape: (seq, d_model)
         // Phase 7-3: matmul_t2 で W_QKV (d, 3d) の transpose を materialize しない (省 6 MB)
@@ -368,31 +371,33 @@ fn scaled_dot_product_attention_backward(
     dl_dout: &Matrix,
 ) -> (Matrix, Matrix, Matrix) {
     let d_k = q.cols() as f32;
-    let scale = d_k.sqrt();
+    let inv_scale = 1.0 / d_k.sqrt();
 
     // dl_dv = P^T @ dl_dout  [seq, d_head]  (Phase 7-3: matmul_t1)
     let dl_dv = att_w.matmul_t1(dl_dout);
 
-    // dl_dP = dl_dout @ V^T  [seq, seq]  (Phase 7-3: matmul_t2)
-    let dl_dp = dl_dout.matmul_t2(v);
-
-    // softmax backward: dl_dS[i][j] = P[i][j] * (dl_dP[i][j] - Σ_k P[i][k]*dl_dP[i][k])
-    let seq = att_w.rows();
-    let mut dl_ds = Matrix::zeros(seq, seq);
-    for i in 0..seq {
-        let p_row = att_w.row(i);
-        let dp_row = dl_dp.row(i);
-        let dot: f32 = p_row.iter().zip(dp_row).map(|(p, dp)| p * dp).sum();
-        let ds_row = dl_ds.row_mut(i);
-        for j in 0..seq {
-            ds_row[j] = p_row[j] * (dp_row[j] - dot);
-        }
-    }
-
-    // スケールを戻す: dl_dS /= √d_k
-    for v in dl_ds.data_mut() {
-        *v /= scale;
-    }
+    // dl_dS = scaled softmax-backward(P, dl_dP) を **dl_dP の buffer に in-place** で
+    // 計算する (Phase 7-4)。 旧来は dl_dP (seq×seq=4 MB) と dl_dS (4 MB) を別々に確保
+    // していたが、 dl_dS[i][j] は dp_row[j] のみに依存するため (dot は j 全体の集約で
+    // 1 行の書き換え前に確定する)、 同じ buffer に書き戻して問題ない。
+    // /√d_k スケーリングも同じループに融合 (旧来の 2 度目の sweep を削減)。
+    let mut dl_ds = dl_dout.matmul_t2(v); // 元 dl_dP, in-place で dl_dS に上書き
+    let cols = dl_ds.cols();
+    dl_ds
+        .data_mut()
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(i, ds_row)| {
+            let p_row = att_w.row(i);
+            let dot: f32 = p_row
+                .iter()
+                .zip(ds_row.iter())
+                .map(|(p, dp)| p * dp)
+                .sum();
+            for j in 0..cols {
+                ds_row[j] = p_row[j] * (ds_row[j] - dot) * inv_scale;
+            }
+        });
 
     // dl_dq = dl_dS @ K  [seq, d_head]
     let dl_dq = dl_ds.matmul(k);
@@ -431,9 +436,11 @@ fn scaled_dot_product_attention(
 
     // Attention(Q,K,V) = softmax(QK^T / √d_k)V
     scores.softmax_rows_in_place();
-    let attention_weights = scores.clone();
+    // Phase 7-4: 旧コードでは softmax 後に scores.clone() で attention weights を確保していたが、
+    // matmul は &self しか借りないので、 そのまま `scores` を返せば clone を省略できる
+    // (4 MB × n_heads × n_layers ぶんの per-step アロケを削減)。
     let output = scores.matmul(v);
-    (output, attention_weights)
+    (output, scores)
 }
 
 pub fn causal_mask(seq_len: usize) -> Vec<Vec<bool>> {

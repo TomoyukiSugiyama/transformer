@@ -859,8 +859,13 @@ mod bench_tests {
         println!("  speedup vs Phase 6-c (推定): {speedup:.2}x");
         // Phase 7-2 (transpose 残存) の bench で観測された値: ~1500 ms
         let phase72_per_step_ms = 1500.0;
-        let phase73_speedup = phase72_per_step_ms / per_step_ms;
+        let phase72_speedup = phase72_per_step_ms / per_step_ms;
         println!("  Phase 7-2 (transpose 残存) per-step (実測): ~{phase72_per_step_ms:.0} ms");
-        println!("  speedup vs Phase 7-2 (matmul_t1/t2 効果): {phase73_speedup:.2}x");
+        println!("  speedup vs Phase 7-2 (matmul_t1/t2 効果): {phase72_speedup:.2}x");
+        // Phase 7-3 (matmul_t1/t2) per-step 実測: ~1352 ms
+        let phase73_per_step_ms = 1352.0;
+        let phase74_speedup = phase73_per_step_ms / per_step_ms;
+        println!("  Phase 7-3 (matmul_t1/t2) per-step (実測): ~{phase73_per_step_ms:.0} ms");
+        println!("  speedup vs Phase 7-3 (Phase 7-4 fused matmul-add 効果): {phase74_speedup:.2}x");
     }
 }

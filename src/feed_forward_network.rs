@@ -97,9 +97,8 @@ impl FeedForwardNetwork {
     pub fn backward(&mut self, dl_dz2: &Matrix) -> Matrix {
         // --- W2 の勾配 ---
         // grad_w2 += cache_a^T @ dl_dz2   shape: (d_ff, d_model)
-        // Phase 7-3: matmul_t1 で cache_a の転置 materialize を回避
-        let g_w2 = self.cache_a.matmul_t1(dl_dz2);
-        self.grad_w2.add_in_place(&g_w2);
+        // Phase 7-4: BLAS の beta=1 で fused matmul-add 化 (旧来は temp alloc + add_in_place)。
+        self.cache_a.matmul_t1_add_into(dl_dz2, &mut self.grad_w2);
 
         // --- b2 の勾配 ---
         // grad_b2 += Σ_t dl_dz2[t]
@@ -118,9 +117,9 @@ impl FeedForwardNetwork {
 
         // --- W1 の勾配 ---
         // grad_w1 += cache_x^T @ dl_dz1   shape: (d_model, d_ff)
-        // Phase 7-3: matmul_t1 で cache_x の転置 materialize を回避
-        let g_w1 = self.cache_x.matmul_t1(&dl_dz1);
-        self.grad_w1.add_in_place(&g_w1);
+        // Phase 7-4: BLAS の beta=1 で fused matmul-add 化。
+        self.cache_x
+            .matmul_t1_add_into(&dl_dz1, &mut self.grad_w1);
 
         // --- b1 の勾配 ---
         // grad_b1 += Σ_t dl_dz1[t]

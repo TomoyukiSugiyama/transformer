@@ -105,21 +105,24 @@ CharBPE 8K に下記 special token を追加 (`extend_coverage` API を使う):
 - **戯曲モードを抑制**: top-k/top-p sampling 時に `<DRAMA>` token を mask (logit = -∞) → 散文プロンプトに戯曲が混入しない
 - **ヘッダ生成防止**: `<AUTHOR=...>` `<TITLE>` token を生成時に mask
 
-## 3. Phase 7-a 学習設定 (案)
+## 3. Phase 7-a 学習設定
 
-| 設定項目 | Phase 6-d | **Phase 7-a** | 変更理由 |
-|---------|-----------|---------------|---------|
-| コーパス | `aozora_meiji_taisho.txt` | `aozora_meiji_taisho_v2.txt` | 上記 |
-| Tokenizer | CharBPE 8K | CharBPE 8K + 12 special token | 上記 |
+| 設定項目 | Phase 6-d (実測) | **Phase 7-a** | 変更理由 |
+|---------|-------------------|---------------|---------|
+| コーパス | `aozora_meiji_taisho.txt` (8.27M char) | `aozora_meiji_taisho_v2.txt` (8.28M char、 章番号削除済) | 戯曲・ヘッダ・章番号擾乱の構造的排除 |
+| Tokenizer | CharBPE 8K (vocab=8000) | CharBPE 8010 (+10 special token) | 作家・戯曲・タイトル・BOS/EOS の atomic tokenize |
 | 形状 | d=512, n=6, max_len=1024 | 同 | (互換) |
 | LR scheduler | WSD (warmup=300, stable=2160, decay=540) | 同 | (Phase 6-d で良好) |
-| バイナリ | Phase 7-2 | Phase 7-2 (+ perf-alloc/B3 が完了していれば適用) | 速度優先 |
-| total step | 3000 | 3000 (要再検討) | データ量ほぼ不変 |
+| バイナリ | Phase 7-1/7-2 (per-step ~9,200 ms) | **Phase 7-4** (per-step ~5,800 ms 想定) | Phase 7-3 (+1.12x) + Phase 7-4 (+1.43x) で **累積 1.59x speedup** |
+| total step | 3000 (best step 2800) | 3000 (要再検討、 速度余裕あれば 3500 へ増量も可) | データ量ほぼ不変 |
+| 想定 total time | 7h 41min (実測) | **~5 h** (Phase 7-4 効果) | -35% |
 
-期待効果:
-- BPC: 4.24 → **3.9-4.0** (-5〜-8%)
-- 推論品質: 戯曲混入解消 + 作家文体の使い分け鮮明化
-- ヘッダ生成消失
+期待効果 (Phase 6-d 実測 BPC=4.22 基準):
+- **BPC: 4.22 → 3.9-4.1** (-3 〜 -7%)。 主因は (a) 戯曲台詞 (3.45% of tokens) のノイズ除去で perplexity 改善、 (b) 作家トークンによる「どの作家の語彙か」を学習可能に。
+- 推論品質: **戯曲混入解消** (推論時に `<DRAMA>` token を logit mask) + **作家文体の使い分け鮮明化** (prompt 先頭に `<AUTHOR=...>` を挿入で強制)
+- **ヘッダ生成消失** (`<AUTHOR=...>` `<TITLE>` token を logit mask)
+
+期待が控えめ (Phase 6-d 計画の -5 〜 -8% より小さく設定) なのは、 Phase 6-d が当初期待 -2 〜 -5% に対し実測 -0.6% に留まった経験を踏まえての保守的見積り。
 
 ## 4. 実装手順 (P7-1-B 以降)
 
@@ -127,7 +130,7 @@ CharBPE 8K に下記 special token を追加 (`extend_coverage` API を使う):
 |---------|------|------|
 | **P7-1-B** | `src/bin/clean_aozora_corpus.rs` 作成。 旧コーパスを v2 形式に変換 | ✅ 完了 (504 作品 → 8,285,143 char、 戯曲 8 作品を `<DRAMA>` で囲む) |
 | **P7-1-C** | `CharBpeTokenizer::add_special_token` API + `src/bin/extend_tokenizer.rs` で 10 個の special token を追加 | ✅ 完了 (`tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin`) |
-| **P7-1-D** | `main.rs` に `aozora_meiji_taisho_charbpe8k_max1024_wsd_v2()` config 追加。 学習起動 | ✅ config 追加済、 ⏳ ユーザー判断待ち (学習 6-7 h 想定) |
+| **P7-1-D** | `main.rs` に `aozora_meiji_taisho_charbpe8k_max1024_wsd_v2()` config 追加。 学習起動 | ✅ config 追加済、 ⏳ ユーザー判断待ち (Phase 7-4 バイナリで学習 ~5 h 想定) |
 
 ### 4.1 P7-1-B: corpus cleaning (`src/bin/clean_aozora_corpus.rs`)
 
