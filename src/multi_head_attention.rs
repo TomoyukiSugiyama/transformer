@@ -172,11 +172,11 @@ impl MultiHeadAttention {
 
     pub fn backward(&mut self, dl_dout: &Matrix) -> Matrix {
         // W_O backward
-        // grad_w_o += concat^T @ dl_dout
-        let g_w_o = self.cache_concat.transpose().matmul(dl_dout);
+        // grad_w_o += concat^T @ dl_dout  (Phase 7-3: matmul_t1 で transpose アロケを回避)
+        let g_w_o = self.cache_concat.matmul_t1(dl_dout);
         self.grad_w_o.add_in_place(&g_w_o);
-        // dl_dconcat = dl_dout @ W_O^T
-        let dl_dconcat = dl_dout.matmul(&self.w_o.transpose());
+        // dl_dconcat = dl_dout @ W_O^T  (Phase 7-3: matmul_t2 で transpose アロケを回避)
+        let dl_dconcat = dl_dout.matmul_t2(&self.w_o);
 
         // concat_heads backward → head ごとに dl_dconcat をスライス
         let dl_dhead_outs = dl_dconcat.split_columns(self.n_heads);
@@ -226,12 +226,13 @@ impl MultiHeadAttention {
         let dl_dqkv = Matrix::concat_columns(&[dl_dq, dl_dk, dl_dv]);
 
         // grad_w_qkv += cache_x^T @ dl_dqkv  shape: (d_model, 3*d_model)
-        let cache_x_t = self.cache_x.transpose();
-        let g_w_qkv = cache_x_t.matmul(&dl_dqkv);
+        // Phase 7-3: matmul_t1 で cache_x の transpose を materialize しない
+        let g_w_qkv = self.cache_x.matmul_t1(&dl_dqkv);
         self.grad_w_qkv.add_in_place(&g_w_qkv);
 
         // dl_dx = dl_dqkv @ W_QKV^T  shape: (seq, d_model)
-        dl_dqkv.matmul(&self.w_qkv.transpose())
+        // Phase 7-3: matmul_t2 で W_QKV (d, 3d) の transpose を materialize しない (省 6 MB)
+        dl_dqkv.matmul_t2(&self.w_qkv)
     }
 
     /// 推論専用 (KV cache あり) の 1 token 前進。
@@ -369,11 +370,11 @@ fn scaled_dot_product_attention_backward(
     let d_k = q.cols() as f32;
     let scale = d_k.sqrt();
 
-    // dl_dv = P^T @ dl_dout  [seq, d_head]
-    let dl_dv = att_w.transpose().matmul(dl_dout);
+    // dl_dv = P^T @ dl_dout  [seq, d_head]  (Phase 7-3: matmul_t1)
+    let dl_dv = att_w.matmul_t1(dl_dout);
 
-    // dl_dP = dl_dout @ V^T  [seq, seq]
-    let dl_dp = dl_dout.matmul(&v.transpose());
+    // dl_dP = dl_dout @ V^T  [seq, seq]  (Phase 7-3: matmul_t2)
+    let dl_dp = dl_dout.matmul_t2(v);
 
     // softmax backward: dl_dS[i][j] = P[i][j] * (dl_dP[i][j] - Σ_k P[i][k]*dl_dP[i][k])
     let seq = att_w.rows();
@@ -395,8 +396,8 @@ fn scaled_dot_product_attention_backward(
 
     // dl_dq = dl_dS @ K  [seq, d_head]
     let dl_dq = dl_ds.matmul(k);
-    // dl_dk = dl_dS^T @ Q  [seq, d_head]
-    let dl_dk = dl_ds.transpose().matmul(q);
+    // dl_dk = dl_dS^T @ Q  [seq, d_head]  (Phase 7-3: matmul_t1)
+    let dl_dk = dl_ds.matmul_t1(q);
 
     (dl_dq, dl_dk, dl_dv)
 }
@@ -410,8 +411,8 @@ fn scaled_dot_product_attention(
     let d_k = q.cols() as f32;
     let scale = d_k.sqrt();
 
-    // QK^T / √d_k
-    let mut scores = q.matmul(&k.transpose());
+    // QK^T / √d_k  (Phase 7-3: matmul_t2 で K の transpose を materialize しない)
+    let mut scores = q.matmul_t2(k);
     for s in scores.data_mut() {
         *s /= scale;
     }

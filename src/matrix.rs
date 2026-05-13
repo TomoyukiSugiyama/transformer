@@ -27,6 +27,7 @@ mod accelerate {
 
     pub const CBLAS_ROW_MAJOR: c_int = 101;
     pub const CBLAS_NO_TRANS: c_int = 111;
+    pub const CBLAS_TRANS: c_int = 112;
 
     #[link(name = "Accelerate", kind = "framework")]
     unsafe extern "C" {
@@ -160,53 +161,45 @@ impl Matrix {
             self.rows, self.cols, other.rows, other.cols
         );
         let m = self.rows;
-        let k = self.cols;
         let n = other.cols;
         let mut out = Matrix::zeros(m, n);
+        sgemm_general(self, false, other, false, &mut out);
+        out
+    }
 
-        #[cfg(target_os = "macos")]
-        // SAFETY: out は (m, n) を確保済みで self/other とメモリ非共有。
-        // row-major かつ no-transpose、 leading dim = cols (= 行内連続の row stride)。
-        unsafe {
-            accelerate::cblas_sgemm(
-                accelerate::CBLAS_ROW_MAJOR,
-                accelerate::CBLAS_NO_TRANS,
-                accelerate::CBLAS_NO_TRANS,
-                m as i32,
-                n as i32,
-                k as i32,
-                1.0,
-                self.data.as_ptr(),
-                k as i32,
-                other.data.as_ptr(),
-                n as i32,
-                0.0,
-                out.data.as_mut_ptr(),
-                n as i32,
-            );
-        }
+    /// `self^T @ other`。 `self` (k, m), `other` (k, n) → `(m, n)`。
+    /// `cache_x.transpose().matmul(&dl_dy)` のような **転置行列を一旦アロケーション** していた
+    /// パターンを、 BLAS の trans フラグだけで処理して **transpose のメモリコピーを完全に省く**。
+    ///
+    /// Phase 7-3 高速化で導入: backward 系の `*.transpose().matmul(_)` を一掃する。
+    pub fn matmul_t1(&self, other: &Matrix) -> Matrix {
+        assert_eq!(
+            self.rows, other.rows,
+            "matmul_t1 shape mismatch: ({}, {})^T × ({}, {})",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        let m = self.cols; // self^T の行数 = self の列数
+        let n = other.cols;
+        let mut out = Matrix::zeros(m, n);
+        sgemm_general(self, true, other, false, &mut out);
+        out
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        // SAFETY: 同上。 matrixmultiply の row/col stride 表現に合わせる。
-        unsafe {
-            matrixmultiply::sgemm(
-                m,
-                k,
-                n,
-                1.0,
-                self.data.as_ptr(),
-                self.cols as isize,
-                1,
-                other.data.as_ptr(),
-                other.cols as isize,
-                1,
-                0.0,
-                out.data.as_mut_ptr(),
-                n as isize,
-                1,
-            );
-        }
-
+    /// `self @ other^T`。 `self` (m, k), `other` (n, k) → `(m, n)`。
+    /// `dl_dz @ w.transpose()` のような **転置行列を一旦アロケーション** していたパターンを、
+    /// BLAS の trans フラグだけで処理して **transpose のメモリコピーを完全に省く**。
+    ///
+    /// Phase 7-3 高速化で導入: backward 系の `*.matmul(&w.transpose())` を一掃する。
+    pub fn matmul_t2(&self, other: &Matrix) -> Matrix {
+        assert_eq!(
+            self.cols, other.cols,
+            "matmul_t2 shape mismatch: ({}, {}) × ({}, {})^T",
+            self.rows, self.cols, other.rows, other.cols
+        );
+        let m = self.rows;
+        let n = other.rows; // other^T の列数 = other の行数
+        let mut out = Matrix::zeros(m, n);
+        sgemm_general(self, false, other, true, &mut out);
         out
     }
 
@@ -360,7 +353,9 @@ impl Matrix {
             .collect()
     }
 
-    /// `split_columns` の逆。各行ごとに横に並べて 1 つの行列にまとめる。
+    /// `split_columns` の逆。 各行ごとに横に並べて 1 つの行列にまとめる。
+    /// Phase 7-3 では `&[Matrix]` のまま受け取れる API を維持し、 owned Vec も &[&Matrix] も
+    /// 受け付けたいシーンでは `concat_columns_refs` を使う。
     pub fn concat_columns(parts: &[Matrix]) -> Matrix {
         assert!(!parts.is_empty(), "concat_columns: empty input");
         let rows = parts[0].rows;
@@ -380,6 +375,106 @@ impl Matrix {
             }
         }
         Matrix::from_flat(data, rows, cols)
+    }
+}
+
+/// `op(A) @ op(B) → C` を計算する内部 sgemm ヘルパ。
+///
+/// `trans_a` / `trans_b` で各オペランドを転置するかを指定する。 転置は **メタデータだけ** で
+/// 切り替わり、 メモリ上の transpose コピーは発生しない (BLAS の trans フラグを使う)。
+///
+/// 期待形状:
+/// - `op(A)` = `(m, k)`、 `op(B)` = `(k, n)`、 `out` = `(m, n)`
+/// - row-major 表現
+fn sgemm_general(a: &Matrix, trans_a: bool, b: &Matrix, trans_b: bool, out: &mut Matrix) {
+    let (m, k) = if trans_a {
+        (a.cols, a.rows)
+    } else {
+        (a.rows, a.cols)
+    };
+    let (k_b, n) = if trans_b {
+        (b.cols, b.rows)
+    } else {
+        (b.rows, b.cols)
+    };
+    assert_eq!(
+        k, k_b,
+        "sgemm_general inner-dim mismatch: op(A)=({m}, {k}) × op(B)=({k_b}, {n})"
+    );
+    assert_eq!(
+        out.shape(),
+        (m, n),
+        "sgemm_general out shape mismatch: expected ({m}, {n}) got {:?}",
+        out.shape()
+    );
+
+    // leading dimension は **転置の有無に関わらず元の `cols`** であることに注意。
+    // BLAS は op(X) ではなく X 自身の lda を使う。
+    let lda = a.cols as i32;
+    let ldb = b.cols as i32;
+    let ldc = n as i32;
+
+    #[cfg(target_os = "macos")]
+    // SAFETY: out は (m, n) を確保済みで a/b とメモリ非共有。
+    unsafe {
+        accelerate::cblas_sgemm(
+            accelerate::CBLAS_ROW_MAJOR,
+            if trans_a {
+                accelerate::CBLAS_TRANS
+            } else {
+                accelerate::CBLAS_NO_TRANS
+            },
+            if trans_b {
+                accelerate::CBLAS_TRANS
+            } else {
+                accelerate::CBLAS_NO_TRANS
+            },
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a.data.as_ptr(),
+            lda,
+            b.data.as_ptr(),
+            ldb,
+            0.0,
+            out.data.as_mut_ptr(),
+            ldc,
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    // SAFETY: 同上。 matrixmultiply は明示的な trans フラグを持たないので、 row/col stride
+    // を入れ替えることで論理的な転置を表現する。
+    // 通常 (no trans):    rsa = cols, csa = 1
+    // 転置 (trans):       rsa = 1,    csa = cols    ← 行と列の役割を入れ替え
+    unsafe {
+        let (rsa, csa) = if trans_a {
+            (1isize, a.cols as isize)
+        } else {
+            (a.cols as isize, 1isize)
+        };
+        let (rsb, csb) = if trans_b {
+            (1isize, b.cols as isize)
+        } else {
+            (b.cols as isize, 1isize)
+        };
+        matrixmultiply::sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a.data.as_ptr(),
+            rsa,
+            csa,
+            b.data.as_ptr(),
+            rsb,
+            csb,
+            0.0,
+            out.data.as_mut_ptr(),
+            n as isize,
+            1,
+        );
     }
 }
 
@@ -514,6 +609,89 @@ mod tests {
                     (x - y).abs()
                 );
             }
+        }
+    }
+
+    /// Phase 7-3: 転置版 matmul_t1 (= self^T @ other) が `transpose().matmul(_)` と
+    /// 数値的に一致することを確認。 BLAS の trans フラグ経路の正当性検証。
+    #[test]
+    fn matmul_t1_matches_transpose_then_matmul() {
+        use rand::{RngExt, SeedableRng, rngs::SmallRng};
+        let mut rng = SmallRng::seed_from_u64(42);
+        let cases: &[(usize, usize, usize)] = &[
+            (1, 1, 1),
+            (3, 5, 7),
+            (16, 32, 8),
+            (64, 128, 256),
+        ];
+        for &(k, m, n) in cases {
+            // self: (k, m), other: (k, n)  → self^T @ other = (m, n)
+            let a_data: Vec<f32> = (0..k * m).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let b_data: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let a = Matrix::from_flat(a_data, k, m);
+            let b = Matrix::from_flat(b_data, k, n);
+            let expected = a.transpose().matmul(&b);
+            let actual = a.matmul_t1(&b);
+            assert_eq!(actual.shape(), expected.shape());
+            let tol = 1e-3 * k as f32;
+            for (x, y) in actual.data().iter().zip(expected.data().iter()) {
+                assert!(
+                    (x - y).abs() <= tol,
+                    "matmul_t1 mismatch ({k},{m},{n}): {x} vs {y}"
+                );
+            }
+        }
+    }
+
+    /// Phase 7-3: 転置版 matmul_t2 (= self @ other^T) が `self.matmul(&other.transpose())` と
+    /// 数値的に一致することを確認。
+    #[test]
+    fn matmul_t2_matches_matmul_then_transpose() {
+        use rand::{RngExt, SeedableRng, rngs::SmallRng};
+        let mut rng = SmallRng::seed_from_u64(43);
+        let cases: &[(usize, usize, usize)] = &[
+            (1, 1, 1),
+            (3, 5, 7),
+            (16, 32, 8),
+            (64, 128, 256),
+        ];
+        for &(m, k, n) in cases {
+            // self: (m, k), other: (n, k)  → self @ other^T = (m, n)
+            let a_data: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let b_data: Vec<f32> = (0..n * k).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let a = Matrix::from_flat(a_data, m, k);
+            let b = Matrix::from_flat(b_data, n, k);
+            let expected = a.matmul(&b.transpose());
+            let actual = a.matmul_t2(&b);
+            assert_eq!(actual.shape(), expected.shape());
+            let tol = 1e-3 * k as f32;
+            for (x, y) in actual.data().iter().zip(expected.data().iter()) {
+                assert!(
+                    (x - y).abs() <= tol,
+                    "matmul_t2 mismatch ({m},{k},{n}): {x} vs {y}"
+                );
+            }
+        }
+    }
+
+    /// matmul_t1 と matmul_t2 の組み合わせ: A^T @ B^T = (B @ A)^T
+    /// (BLAS の double-trans が壊れていないかの sanity check)
+    #[test]
+    fn matmul_t1_t2_roundtrip_identity() {
+        let a = Matrix::from_jagged(&[
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+        ]); // (2, 3)
+        let b = Matrix::from_jagged(&[
+            vec![7.0, 8.0],
+            vec![9.0, 10.0],
+        ]); // (2, 2)
+        // a^T (3, 2) @ b (2, 2) = (3, 2)
+        let direct = a.matmul_t1(&b);
+        // (b^T @ a)^T = ((2,2) @ (2,3))^T = (2,3)^T = (3,2)
+        let via_t2 = b.matmul_t1(&a).transpose();
+        for (x, y) in direct.data().iter().zip(via_t2.data().iter()) {
+            assert!((x - y).abs() < 1e-5, "{x} vs {y}");
         }
     }
 

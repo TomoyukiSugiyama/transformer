@@ -207,13 +207,70 @@ per-token 推論で発生していた jagged ↔ Matrix 変換 (3 ペア × n_la
   (推論速度改善効果は数 % 程度を予想、 実測は Phase 6-d 完走後)
 - **API 一本化** = 新メソッド追加時に「`_matrix` 付ける?」の判断不要
 
+### Phase 7-3: 転置行列 materialize の排除 (✅ 完了)
+
+backward 中の `_.transpose().matmul(_)` 17 箇所を BLAS の trans フラグ経由に置換し、
+**転置行列のメモリアロケーションとコピー** を完全に排除する。
+
+#### 1. 問題
+
+backward では下記のような形が頻出:
+
+```rust
+// W2 の grad: cache_a^T @ dl_dz2
+let g_w2 = self.cache_a.transpose().matmul(dl_dz2);
+// dL/dx: dl_dz1 @ W1^T
+let dl_dx = dl_dz1.matmul(&self.w1.transpose());
+```
+
+`cache_a.transpose()` や `w1.transpose()` で **転置済みの行列を新規アロケート** していた。
+特に `OutputHead` の `W^T` (vocab=8K, d=512 → 16 MB) や `MHA` の `W_QKV^T` (d×3d → 6 MB)
+は重い。
+
+#### 2. 対応
+
+`Matrix` に下記 2 メソッドを追加:
+
+```rust
+pub fn matmul_t1(&self, other: &Matrix) -> Matrix;  // self^T @ other
+pub fn matmul_t2(&self, other: &Matrix) -> Matrix;  // self @ other^T
+```
+
+内部実装は **`cblas_sgemm` の `CblasTrans` フラグ** (もしくは `matrixmultiply` の row/col stride
+入れ替え) を使い、 転置メタデータだけで処理する。 メモリ上の転置コピーは一切発生しない。
+
+#### 3. 置換対象 (17 箇所)
+
+| ファイル | 箇所 |
+|---------|------|
+| `multi_head_attention.rs` | W_O, W_QKV, V, K, S の各 backward + scaled-dot-product-attention の Q@K^T (計 7) |
+| `feed_forward_network.rs` | W2, W1 の backward (計 4) |
+| `swiglu_feed_forward_network.rs` | W_down, W_gate, W_up の backward (計 6) |
+| `output_head.rs` | W (vocab × d) の backward (計 2) |
+
+#### 4. 効果
+
+bench (`bench_phase7_step_time`, batch=2, max_len=1024) 実測:
+
+| 段階 | per-step | speedup vs 7-2 |
+|------|---------:|---------------:|
+| Phase 7-2 (transpose 残存) | ~1500 ms | 1.00x |
+| **Phase 7-3 (transpose 排除)** | **~1352 ms** (3 run avg: 1336/1339/1381) | **1.10-1.12x** |
+
+実訓練 (batch=16) 換算では Phase 7-2 ~9000 ms → Phase 7-3 ~8100 ms (10% 短縮、 6-d の
+6.4 h → ~5.7 h を期待)。
+
+副次効果として **per-step メモリアロケが ~50-100 MB 減少** (transpose 用一時バッファ消滅) し、
+GC/malloc 圧も軽くなる。
+
 ### 今後 (検討中)
 
 - **B3 Flash Attention 風 (CPU online softmax + matmul 融合)**:
   attention scores 行列 (`seq² × n_heads × n_layers` = 192 MB @ Phase 6-c) のメモリ I/O を削減。
   実装難度は中、 期待 1.3-2x (attention 部分のみ)。
-- **アロケーション削減**: `split_columns` / `concat_columns` / `transpose` が backward 中に
-  数 GB を再アロケしている可能性あり。 pre-allocated buffer 化で 1.1-1.3x。
+- **アロケーション削減 (Phase 7-4 候補)**: `split_columns` / `concat_columns` の `_into` API
+  と pre-allocated buffer 化で 1.05-1.15x。 残る big alloc は MHA 内の `concat`、 `dl_dqkv` (6MB)、
+  per-head `scores`/`dl_dp`/`dl_ds` (各 4MB × 8 head × 6 layer = 576 MB)。
 - **bf16 mixed precision (Apple BNNS)**: 期待 1.8-2.5x、 実装難度大。 数値安定性試験要。
 - **KvCache の事前確保**: 推論時のみ。 alloc/realloc を削除。
 - **Embedding / SinusoidalPE / Rope の table を Matrix 化**: 残った `Vec<Vec<f32>>` の内部表現。

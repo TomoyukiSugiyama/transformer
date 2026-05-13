@@ -97,7 +97,8 @@ impl FeedForwardNetwork {
     pub fn backward(&mut self, dl_dz2: &Matrix) -> Matrix {
         // --- W2 の勾配 ---
         // grad_w2 += cache_a^T @ dl_dz2   shape: (d_ff, d_model)
-        let g_w2 = self.cache_a.transpose().matmul(dl_dz2);
+        // Phase 7-3: matmul_t1 で cache_a の転置 materialize を回避
+        let g_w2 = self.cache_a.matmul_t1(dl_dz2);
         self.grad_w2.add_in_place(&g_w2);
 
         // --- b2 の勾配 ---
@@ -109,14 +110,16 @@ impl FeedForwardNetwork {
 
         // --- GELU 手前まで逆伝播 ---
         // dL/da = dl_dz2 @ W2^T   shape: (seq_len, d_ff)
-        let dl_da = dl_dz2.matmul(&self.w2.transpose());
+        // Phase 7-3: matmul_t2 で W2 の転置 materialize を回避
+        let dl_da = dl_dz2.matmul_t2(&self.w2);
 
         // dL/dz1 = dL/da ⊙ GELU'(z1)   shape: (seq_len, d_ff)
         let dl_dz1 = dl_da.elementwise_with(&self.cache_z1, |da, z| da * Self::gelu_grad(z));
 
         // --- W1 の勾配 ---
         // grad_w1 += cache_x^T @ dl_dz1   shape: (d_model, d_ff)
-        let g_w1 = self.cache_x.transpose().matmul(&dl_dz1);
+        // Phase 7-3: matmul_t1 で cache_x の転置 materialize を回避
+        let g_w1 = self.cache_x.matmul_t1(&dl_dz1);
         self.grad_w1.add_in_place(&g_w1);
 
         // --- b1 の勾配 ---
@@ -128,7 +131,8 @@ impl FeedForwardNetwork {
 
         // --- 上流への勾配 ---
         // dl_dx = dl_dz1 @ W1^T   shape: (seq_len, d_model)
-        dl_dz1.matmul(&self.w1.transpose())
+        // Phase 7-3: matmul_t2 で W1 の転置 materialize を回避
+        dl_dz1.matmul_t2(&self.w1)
     }
 
     pub fn zero_grad(&mut self) {

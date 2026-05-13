@@ -152,11 +152,13 @@ impl OutputHead {
     /// dL/d_logits (seq_len, vocab_size) → dL/d_hidden (seq_len, d_model)
     pub fn backward(&mut self, dl_dlogits: &Matrix) -> Matrix {
         // grad_w += cache_hidden^T @ dl_dlogits   shape: (d_model, vocab_size)
-        let g_w = self.cache_hidden.transpose().matmul(dl_dlogits);
+        // Phase 7-3: matmul_t1 で cache_hidden の transpose を回避
+        let g_w = self.cache_hidden.matmul_t1(dl_dlogits);
         self.grad_w.add_in_place(&g_w);
 
         // dl_dhidden = dl_dlogits @ W^T   shape: (seq_len, d_model)
-        dl_dlogits.matmul(&self.w.transpose())
+        // Phase 7-3: matmul_t2 で W (d, vocab) の transpose を回避 (vocab=8K だと 16 MB 節約!)
+        dl_dlogits.matmul_t2(&self.w)
     }
 
     pub fn zero_grad(&mut self) {

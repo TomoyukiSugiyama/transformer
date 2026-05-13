@@ -808,7 +808,8 @@ mod bench_tests {
         let batch_size = 2;
         let seq_len = 1024;
         let warmup_steps = 1;
-        let measure_steps = 3;
+        // Phase 7-3 で 3 → 5 steps に増やしてばらつき低減 (1 step ≒ 1.3 sec)。
+        let measure_steps = 5;
 
         // 適当な token id 列 (vocab を超えないようランダム)
         let vocab_size = 64; // Char tokenizer の概算 (実際の vocab はそれ未満)
@@ -856,5 +857,10 @@ mod bench_tests {
         let speedup = baseline_per_step_ms / per_step_ms;
         println!("  Phase 6-c (old) per-step @ batch={batch_size}: ~{baseline_per_step_ms:.0} ms (推定)");
         println!("  speedup vs Phase 6-c (推定): {speedup:.2}x");
+        // Phase 7-2 (transpose 残存) の bench で観測された値: ~1500 ms
+        let phase72_per_step_ms = 1500.0;
+        let phase73_speedup = phase72_per_step_ms / per_step_ms;
+        println!("  Phase 7-2 (transpose 残存) per-step (実測): ~{phase72_per_step_ms:.0} ms");
+        println!("  speedup vs Phase 7-2 (matmul_t1/t2 効果): {phase73_speedup:.2}x");
     }
 }

@@ -85,12 +85,12 @@ impl SwiGluFeedForwardNetwork {
     }
 
     pub fn backward(&mut self, dl_dy: &Matrix) -> Matrix {
-        // W_down の grad
-        let g_w_down = self.cache_a.transpose().matmul(dl_dy);
+        // W_down の grad  (Phase 7-3: matmul_t1 で cache_a の transpose を回避)
+        let g_w_down = self.cache_a.matmul_t1(dl_dy);
         self.grad_w_down.add_in_place(&g_w_down);
 
-        // dL/da
-        let dl_da = dl_dy.matmul(&self.w_down.transpose());
+        // dL/da  (Phase 7-3: matmul_t2 で w_down の transpose を回避)
+        let dl_da = dl_dy.matmul_t2(&self.w_down);
 
         // dL/dgate, dL/dup を作る (要素積 + Swish' 適用)
         let dl_da_du = dl_da.elementwise_with(&self.cache_up, |da, u| da * u);
@@ -98,15 +98,15 @@ impl SwiGluFeedForwardNetwork {
         let dl_dgate =
             dl_da_du.elementwise_with(&self.cache_gate, |da_du, g| da_du * Self::swish_grad(g));
 
-        // W_gate / W_up の grad
-        let g_w_gate = self.cache_x.transpose().matmul(&dl_dgate);
-        let g_w_up = self.cache_x.transpose().matmul(&dl_dup);
+        // W_gate / W_up の grad  (Phase 7-3: matmul_t1 で cache_x の転置を 2 回再利用)
+        let g_w_gate = self.cache_x.matmul_t1(&dl_dgate);
+        let g_w_up = self.cache_x.matmul_t1(&dl_dup);
         self.grad_w_gate.add_in_place(&g_w_gate);
         self.grad_w_up.add_in_place(&g_w_up);
 
-        // dL/dx = dL/dgate @ W_gate^T + dL/dup @ W_up^T
-        let dl_dx_gate = dl_dgate.matmul(&self.w_gate.transpose());
-        let dl_dx_up = dl_dup.matmul(&self.w_up.transpose());
+        // dL/dx = dL/dgate @ W_gate^T + dL/dup @ W_up^T  (Phase 7-3: matmul_t2)
+        let dl_dx_gate = dl_dgate.matmul_t2(&self.w_gate);
+        let dl_dx_up = dl_dup.matmul_t2(&self.w_up);
         let mut dl_dx = dl_dx_gate;
         dl_dx.add_in_place(&dl_dx_up);
 
