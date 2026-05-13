@@ -546,9 +546,9 @@ impl Config {
     /// Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 コーパス** + **special token (作家・戯曲)**。
     ///
     /// 変更点:
-    /// - corpus: `corpus/aozora_meiji_taisho_v2.txt` (504 作品、 旧 `=====` ヘッダを `<BOS><AUTHOR=...><TITLE>...</TITLE>...<EOS>` に変換、 戯曲フォーマット 8 作品を `<DRAMA>...</DRAMA>` で囲む)
-    /// - tokenizer: `tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin` (Phase 6-a の 8K cache に 10 個の special token を追加した拡張版。 `extend_tokenizer` バイナリで生成)
-    /// - vocab_size: 8000 → 8010 (=10 special tokens 追加)
+    /// - corpus: `corpus/aozora_meiji_taisho_v2.txt` (504 作品、 旧 `=====` ヘッダを `<BOS><AUTHOR=...><TITLE>...</TITLE>...<EOS>` に変換、 戯曲フォーマット 8 作品を `<DRAMA>...</DRAMA>` で囲む。 Phase 7-1-B 第 1-10 弾のクレンジングで章番号行 1,764 行 + 編集者注釈 33 個を除去済)
+    /// - tokenizer: `tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin` (クレンジング後 v2 で CharBPE を 1 から再訓練 + 10 個 special token 追加。 `extend_tokenizer` バイナリで生成。 `</TITLE>` が BPE merge と衝突したため実 vocab=8009、 ファイル名は cfg と同期して v8010)
+    /// - vocab_size: 8009 (= 8000 BPE merges + 9 new special tokens; `</TITLE>` は BPE merge と id 衝突で重複追加なし)
     /// - LR scheduler: Phase 6-d 同 (WSD warmup=300, stable=2160, decay=540)
     /// - 高速化: Phase 7-3 (matmul_t1/t2) を取り込んだバイナリ
     ///
@@ -563,7 +563,10 @@ impl Config {
         let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024_wsd();
         cfg.run_name = "phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2";
         cfg.corpus_path = "corpus/aozora_meiji_taisho_v2.txt";
-        cfg.vocab_size = 8010; // 8000 (元 vocab) + 10 (TITLE/DRAMA + 6 author + close tags)
+        // 8010: 8000 BPE merges + 9 new specials (</TITLE> は BPE merge と衝突して重複追加なし、 実 vocab=8009)。
+        // ただし `tokenizer_cache_path()` が cfg.vocab_size をファイル名に使う都合上、 cache 命名と整合させるため
+        // cfg は 8010 のまま (モデル構築時は tokenizer.vocab_size() が使われるため実害なし)。
+        cfg.vocab_size = 8010;
         cfg
     }
 
@@ -595,14 +598,16 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 7-a: Phase 6-d と同形状 + **クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-4 高速化バイナリ**。
+    // Phase 7-a (clean retry): Phase 6-d と同形状 + **完全クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-4 高速化バイナリ**。
     //   - corpus: corpus/aozora_meiji_taisho_v2.txt (504 作品、 旧 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
-    //             戯曲 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1131 行を削除)
-    //   - tokenizer: tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin (8000 + 10 special token)
+    //             戯曲 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1,764 行 + 編集者注釈 33 個を除去 = Phase 7-1-B 第 1-10 弾)
+    //   - tokenizer: tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin
+    //                (クリーン v2 で CharBPE を再訓練、 vocab=8009 = 8000 BPE + 9 specials。 `</TITLE>` は BPE merge と衝突して重複追加なし)
     //   - LR: WSD (warmup=300, stable=2160, decay=540) — Phase 6-d と同
     //   - 高速化: Phase 7-3 (matmul_t1/t2 で transpose materialize 排除、 1.12x vs 7-2)
     //            + Phase 7-4 (fused matmul-add + scores.clone 削除 + softmax backward in-place、 1.43x vs 7-3)
     //            累積 1.59x vs 7-2、 Phase 6-d 実測 ~9,200 ms/step → ~5,800 ms/step 想定
+    //   なお初回 (pre-clean) は step 780 まで進めて停止 (val_ppl 100 @ step 600)、 クレンジング完了後に再起動 → checkpoints/..._pre_clean_aborted_step780/ に退避
     //   期待: total ~5 h、 BPC 4.22 → 3.9-4.1 (-3〜-7%)、 戯曲混入と作家ミックスとヘッダ生成の構造的解消。
     let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
     training_and_inference(&cfg);
