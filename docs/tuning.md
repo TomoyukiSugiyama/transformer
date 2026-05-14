@@ -7,14 +7,19 @@
 - 行ごとに `<EOS>` を付けると EOS バイアスが発生し、 推論時に 1 token で打ち切られやすくなる。 連結方式では EOS は不要 (`max_new_tokens` で停止)。
 
 ## 学習率
-- `lr_max ≒ 3e-4`、 `lr_min ≒ 1e-5`、 `warmup_steps ≒ 200` が小規模 Transformer の典型値。
+- `lr_max ≒ 3e-4`、 `lr_min ≒ 1e-5`、 `warmup_steps ≒ 200` が小規模 Transformer の典型値。 中規模 (~20-50M params) では `lr_max=5e-7e-4` が安定。
 - `lr_min` を `0` 付近にすると終盤が完全に止まるため、 **`1e-5` 程度のフロアを残す**。
 - checkpoint から `end_step` を伸ばして再開すると、 scheduler の進捗がリセットされて lr が上振れする (**warm restart 効果**)。 停滞局所解からの脱出に使える。
+- **schedule の選択**:
+  - **Cosine** (古典): warmup → 全期間で滑らかに減衰。 シンプルだが `total_steps` を変えると過去 step の lr が変わるので checkpoint からの追加学習に向かない。
+  - **WarmupStableDecay (WSD)**: warmup → stable (lr_max 一定) → decay の 3 段。 大半を `lr_max` で回し、 終盤 15-20% で `1-sqrt(progress)` 減衰させる (MiniCPM/DeepSeek 流)。 同 BPC を 15-30% 早く到達できる場合があり、 さらに **stable 区間の checkpoint からそのまま追加学習に流用できる** (lr 軌道が変わらないため)。 Phase 6-d 以降は WSD を採用。
 
-![lr スケジューラ (warmup 200 step + cosine decay, lr_max=3e-4 → lr_min=1e-5)](lr_schedule.png)
+![Phase 7a の WSD スケジュール (warmup=300 + stable=2160 + sqrt decay=540, lr_max=7e-4 → lr_min=7e-5)](phase7a_lr.png)
 
-実際のスケジュール (`end_step=10000`)。 200 step で `lr_max=3e-4` まで一気に立ち上がり、 そこから cosine で
-`lr_min=1e-5` まで滑らかに減衰する。 序盤の急峻な warmup と、 終盤の floor (完全に 0 にしない) が肝。
+実際の WSD スケジュール例 (Phase 7a、 `end_step=3000`)。 step 300 で `lr_max=7e-4` に到達した後、
+**stable 区間で 2,160 step (= 全体の 72%) は `lr_max` を維持**、 step 2,460 から `1-sqrt(progress)` で
+急速に `lr_min=7e-5` まで減衰させる。 序盤の高 lr で粗く探索、 終盤の急減衰でローカルミニマムに収束、
+というメリハリが付く。
 
 ## バッチとミニバッチ勾配
 - `batch_size` 個の `forward_backward` で勾配を累積し、 まとめて 1 回 `apply_gradients` する。
@@ -51,13 +56,21 @@
 
 ## 過学習と最適 step の見極め
 
-Tiny Shakespeare (~330k token) を `d_model=256` モデルで 10000 step 学習させた実例:
+### Phase 7a (~21M params + 8.3M char コーパス + WSD): 健全な収束
 
-![loss / ema / min / max の推移 (d_model=256, n_heads=8, d_ff=1024, n_layers=4, 10000 step)](learning_rate.png)
+Aozora 明治大正コーパスを `d_model=512, n_layers=6` (CharBPE 8K, WSD scheduler) で 3000 step 学習させた実例:
 
-序盤 (~500 step) で急減、 中盤 (500〜3000 step) は穏やかに低下、 終盤 (4000 step 以降) は ema が
-1.0 を切り `~0.3` まで下がり続ける。 数値上の収束に対して、 **推論品質のピークは loss が 2〜3 前後の
-中盤帯 (step 2500〜3500)** にあり、 後段の loss 低下は過学習による記憶化に対応する。
+![Phase 7a 学習曲線 (train / EMA / val loss、 best val_loss=4.344 @ step 2800)](phase7a_loss.png)
+
+- **train loss (青)** と **EMA (赤)** はほぼ単調減少 (~9.0 → ~3.2)。
+- **val loss (緑)** は step 200 で 5.6 → step 2800 で **4.34 (best)** まで継続的に改善し、 終盤までほぼ平坦に収まる。 train との **gap も拡大しない** (差は 1.0-1.2 nats で安定)。
+- WSD の **decay 区間 (step 2460-3000)** で val が再度わずかに改善し、 step 2800 で best 更新。
+
+このように **dropout=0.2 + weight_decay=0.1 + コーパス十分 (~5M token)** が揃うと、 val が単調に下がり続けて末端まで過学習しないのが理想形。 best checkpoint の選択も val_loss 最小で安全 (推論品質も連動)。
+
+### 対照: Tiny Shakespeare (~5M params + 330k token、 正則化なし): 典型的な過学習パターン
+
+参考までに、 ごく小規模なコーパスを正則化なしで長時間回すと逆のパターンになる。
 
 | step | loss | perplexity | 推論品質 |
 |------|------|-----------|---------|
@@ -70,13 +83,13 @@ Tiny Shakespeare (~330k token) を `d_model=256` モデルで 10000 step 学習�
 | 10000 | 0.32 | ~1.4 | 完全記憶状態 (配役は更に絞り込まれるが造語多発) |
 
 loss が下がり続けても汎化品質は途中から劣化する典型例。 **品質ピークは step 2500〜3500 の狭い帯**で、
-それ以降は「loss は下がるが造語が増える死の谷」に入る。 step 4000〜8000 は loss 単調減少にもかかわらず
-推論結果に BPE artifact が散在し品質が落ちる、 step 10000 で再び配役整合は精緻化するが造語は残る、
-という非単調な進行を見せる。
+それ以降は「loss は下がるが造語が増える死の谷」に入る。
 
-**checkpoint は loss 最小ではなく、 推論品質ピークで選ぶ**のが実用的。
-正則化 (dropout, weight decay) を導入していないので、 大きめのモデル × 小さなコーパスでは
-このパターンになりやすい。
+### 教訓
+
+- **checkpoint は val_loss が利用可能なら val_loss 最小で選ぶ** ([Phase 3 以降の `# val step=...` 行](#ログの読み方))。 dropout + weight_decay + 十分なコーパスがあれば train loss と相関する。
+- **val が無い、 または信用できない場合** (Phase 2 Tiny Shakespeare のように 1 epoch 内に loss が極端に下がる場合) は推論品質ピークを定性的に探す必要がある。
+- **大きめのモデル × 小さなコーパスは過学習しやすい**。 dropout 0.2 / weight_decay 0.1 が標準。 さらに小さなコーパスでは early stopping を併用。
 
 ## ログの読み方
 

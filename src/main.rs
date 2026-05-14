@@ -675,7 +675,11 @@ fn main() {
     //     cargo run --release 2>&1 | tee logs/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd.log
     //   起動前チェック: tokenizer cache hit を必ず確認 (cache miss だと 110 分の BPE 再訓練が走る)。
     let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
-    training_and_inference(&cfg);  // ← 起動するときはコメントを外す
+    // training_and_inference(&cfg);  // ← 起動するときはコメントを外す
+    inference_from_checkpoint(
+        &cfg,
+        "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/best.bin",
+    );
 
     // 起動前 dry run: tokenizer cache hit と corpus サイズだけ確認したい場合は次行のみ有効化:
     // bench_tokenizer_with_cache(&cfg);

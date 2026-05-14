@@ -364,8 +364,8 @@ docs/                              # 詳細ドキュメント (本 README から
 ├── training-pipeline.png          # 学習パイプライン図
 ├── tokenizer-family.png           # Tokenizer 3 実装の比較図
 ├── inference-pipeline.png         # 推論パイプライン (KV cache) 図
-├── learning_rate.png              # tuning.md から参照
-└── lr_schedule.png                # tuning.md から参照
+├── phase7a_loss.png               # Phase 7a 学習曲線 (train/EMA/val loss、 tuning.md から参照)
+└── phase7a_lr.png                 # Phase 7a の WSD LR スケジュール (tuning.md から参照)
 
 checkpoints/<run_name>/
 ├── step_NNNNNN.bin            # 学習途中の checkpoint
