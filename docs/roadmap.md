@@ -97,7 +97,7 @@ Phase 6-c で per-step ~11,000 ms (3000 step ≒ 9.2 h) になり、 GPU 移植�
 
 詳細は [`docs/performance.md`](performance.md#phase-7-大規模高速化-2026-05-) を参照。
 
-## コーパス前処理 + 作家・戯曲 special token (Phase 7-a) — 起動準備完了
+## コーパス前処理 + 作家・戯曲 special token (Phase 7-a) — ✅ 完了
 
 Phase 6-d で残った質的課題 (戯曲記号混入、 作家ヘッダ生成、 作家ミックス、 章番号擾乱) を **コーパス + tokenizer 側** で構造的に解決。
 
@@ -107,7 +107,7 @@ Phase 6-d で残った質的課題 (戯曲記号混入、 作家ヘッダ生成�
 | P7-1-B コーパス変換 | `src/bin/clean_aozora_corpus.rs` で `corpus/aozora_meiji_taisho_v2.txt` 生成 (504 作品、 戯曲 8 作品を `<DRAMA>` で囲む、 章番号 1131 行削除) | ✅ 完了 |
 | P7-1-C Tokenizer 拡張 | `CharBpeTokenizer::add_special_token` API 追加 + `tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin` (vocab 8010、 +10 special token) | ✅ 完了 |
 | P7-1-D config 追加 | `Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2()` を `main.rs` に追加 | ✅ 完了 |
-| **Phase 7-a 学習起動** | Phase 7-4 バイナリで run、 per-step ~5,800 ms × 3000 step ≒ **5 h** 想定。 BPC: Phase 6-d 4.22 → **3.9-4.1** (-3〜-7%) 期待 | ⏳ ユーザー判断待ち |
+| **Phase 7-a 学習** | 完走 (3,000 step、 ~6.7 h)、 best step=2800 で **val_loss 4.3443 / val_ppl 77.04 / BPC 4.291**。 Phase 6-d (val_ppl 71.81) 比 +7.3% で僅かに劣化、 ただし生成サンプルは作家別文体が再現され良好 (戯曲混入と作家ヘッダ生成は構造的に解消) | ✅ 完了 |
 
 詳細は [`docs/phase7.md`](phase7.md) を参照。
 
@@ -126,8 +126,8 @@ Phase 7-a までの 20M params × 5M token は Chinchilla 比 **80x 不足**で�
 | **P8-1 [A]** Wikipedia 取得 | `src/bin/fetch_wikipedia_ja.rs` で HuggingFace `wikimedia/wikipedia` (20231101.ja) から Pure Rust + parquet 経由で 1.04B char / 370,523 記事を 63 秒で取得 | ✅ 完了 |
 | **P8-1 [B]** Wikipedia クレンジング | `src/bin/clean_wikipedia_corpus.rs` で trailing reference section 切り捨て + 短記事破棄 → `corpus/wikipedia_ja.txt` (974.7M char / 345,958 記事、 93.4% 保持) | ✅ 完了 |
 | **P8-1 [C]** 混合コーパス作成 | `src/bin/mix_corpus.rs` で Aozora v2 (8M char, 0.84%) + Wikipedia (974M char, 99.16%) → `corpus/aozora_wikipedia_mixed.txt` (**983M char**, 2.4 GB) | ✅ 完了 |
-| P8-1 [D] CharBPE vocab 8K → 32K 再訓練 | `src/bin/train_tokenizer_phase8.rs` 実装済 (stratified sample: Aozora 500K + Wikipedia 1.5M chars、 coverage は混合コーパス全体)。 Phase 7-a 並走時の CPU 競合を回避するため、 完走後に単独実行 (~30-50 min 想定) | 🟡 実装済 / 実行待ち |
-| P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_d768_n8_charbpe32k_max1024_wsd()` (d=768, L=8, vocab=32K, ~50M params)、 per-step ~18-25 s、 完走 25-40 h 想定。 BPC: Phase 7-a 比 -15〜-17% (3.5-3.8) 期待 | ⏳ 未着手 |
+| **P8-1 [D]** CharBPE vocab 8K → 32K 再訓練 | `src/bin/train_tokenizer_phase8.rs` 実行 (110.8 min)、 stratified sample (Aozora 500K + Wiki 1.5M chars) で merge 学習、 全 char カバレッジは混合コーパス全体。 出力 `tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin` (実 vocab=32,009、 `</TITLE>` が BPE merge と衝突)。 chars/token: Aozora **1.795** (Phase 7-a 1.46 から +23%) / Wikipedia **1.873** | ✅ 完了 |
+| P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` 実装済 (`src/main.rs`)。 d=768, n_heads=12, n_layers=8, d_ff=3072, vocab=32K, ~50M params、 batch 16 / max_len 1024、 lr_max 5e-4 + WSD (warmup 500 + stable 8000 + decay 1500 = end_step 10,000)、 log/save/val 50/500/500。 per-step ~17-20 s 想定、 完走 ~50 h ≈ 2 日。 BPC: Phase 7-a 4.29 → **3.5-3.8** (-15〜-17%) 期待。 起動はユーザー判断待ち | 🟡 config 実装済 / 起動待ち |
 
 詳細は [`docs/phase8.md`](phase8.md) を参照。
 

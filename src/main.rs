@@ -570,6 +570,72 @@ impl Config {
         cfg
     }
 
+    /// Phase 8-1 [E]: **混合コーパス (Aozora 5M + Wikipedia 978M = 983M chars) + CharBPE vocab 32K + ~50M params モデル**。
+    ///
+    /// Phase 7-a (vocab 8K, d=512, n=6, ~21M params, 5M chars) からの拡大点:
+    /// - corpus: `corpus/aozora_wikipedia_mixed.txt` (Aozora 5.1M + Wikipedia 977.9M chars、 単純連結 + `\n\n` 区切)。
+    ///   約 200x のコーパス拡大で Chinchilla 則 (params 比 ~20x token) に近づける。
+    /// - tokenizer: `tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin`
+    ///   (BPE 32,000 merges + 9 specials = 32,009、 Aozora 500K + Wiki 1.5M chars stratified サンプルで merge 学習、
+    ///    全 char カバレッジは mixed 全体)。
+    ///   chars/token: Aozora 1.795 (Phase 7-a の 1.56 から +15%)、 Wikipedia 1.873。
+    /// - 形状: d_model 768, n_heads 12, d_ff 3072, n_layers 8 (~50M params、 GPT-2 small 相当)。
+    ///   Phase 5-4c で予約していた最大スケール。
+    /// - max_len: 1024 (Phase 7-a と同)。 batch_size 16 (同)。 1 step あたり 16,384 token = ~9,000 char (Aozora 換算)。
+    /// - lr_max 5e-4 (GPT-2 small 慣例、 50M params 用に 7e-4 から下げる)、 lr_min 5e-5、 warmup 500。
+    /// - LR schedule: WSD (warmup 500, stable 8000, decay 1500 = 15%) で end_step=10000。
+    /// - dropout/wd/beta2: Phase 7-a と同 (0.2 / 0.1 / 0.99)。
+    ///
+    /// 期待:
+    /// - val_ppl は corpus 領域差で Phase 7-a と直接比較不能 (Wikipedia の説明文体は文学テキストより低 ppl になりやすい)。
+    /// - BPC は計測単位として利用可能。 50M params + 1B token なら BPC ~3.5 前後を期待 (literary 領域は >4 のままの可能性)。
+    /// - 主目的は **語彙・知識の幅拡大** + **モデル容量での流暢さ向上**。 質的 sample 評価で
+    ///   「人物名」「歴史的事実」「カタカナ概念」 が破綻なく生成できるかを見る。
+    ///
+    /// 計算量見積:
+    /// - per-step 想定: Phase 7-a (~7,700 ms/step、 21M params) から params 2.4x + d² 比例な部分で
+    ///   ~17,000-20,000 ms/step (M1 Max + Accelerate)。
+    /// - 10,000 steps × 18s ≈ 50 時間 ≈ 2 日。
+    ///
+    /// 注意: 初回起動で tokenizer cache が hit することを `cargo run` で必ず確認すること
+    /// (cache miss だと 110 分の BPE 再訓練が走ってしまうため)。
+    #[allow(dead_code)]
+    fn aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd() -> Self {
+        let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
+        cfg.run_name = "phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd";
+        cfg.corpus_path = "corpus/aozora_wikipedia_mixed.txt";
+        // 32010: 32000 BPE merges + 9 new specials (</TITLE> は BPE merge と衝突して重複追加なし、 実 vocab=32009)。
+        // tokenizer_cache_path() が cfg.vocab_size をファイル名に使う都合上、 リネーム済キャッシュと整合させるため 32010 のまま。
+        cfg.vocab_size = 32010;
+        // tokenizer は train_tokenizer_phase8 が既に学習済 (stratified Aozora 500K + Wiki 1.5M)。
+        // build_or_load_tokenizer は cache hit で即時ロードされるため None で十分。
+        cfg.merge_sample_chars = None;
+
+        // モデル拡大: d 512→768, n_heads 8→12, d_ff 2048→3072, n_layers 6→8 (~21M → ~50M params)。
+        cfg.d_model = 768;
+        cfg.n_heads = 12;
+        cfg.d_ff = 3072;
+        cfg.n_layers = 8;
+
+        // LR: 50M params 用に lr_max を下げる (Phase 7-a の 7e-4 → 5e-4)。
+        cfg.lr_max = 5e-4;
+        cfg.lr_min = 5e-5;
+        cfg.warmup_steps = 500;
+
+        // 学習量: 10,000 steps (Phase 7-a の 3,000 から 3.3x)。
+        // WSD: warmup 500 + stable 8,000 + decay 1,500 = 10,000 (decay 比 15%、 Phase 6-d の 18% より緩め)。
+        cfg.end_step = 10_000;
+        cfg.lr_schedule_kind = LrScheduleKind::WarmupStableDecay { stable_steps: 8_000 };
+
+        // 観測頻度: 長期 run のため間隔を伸ばす (log 50 step、 save 500 step)。
+        // val は同じ 200 step 間隔のままだと 50 回計測でログが煩雑になるので 500 step に。
+        cfg.log_every = 50;
+        cfg.save_every = 500;
+        cfg.val_every = 500;
+
+        cfg
+    }
+
     fn checkpoint_dir(&self) -> String {
         format!("checkpoints/{}", self.run_name)
     }
@@ -598,23 +664,37 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 7-a (clean retry): Phase 6-d と同形状 + **完全クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-4 高速化バイナリ**。
+    // Phase 8-1 [E]: 混合コーパス (Aozora 5M + Wikipedia 978M = 983M chars) + CharBPE 32K + 50M params (d=768, n=8)。
+    //   - corpus: corpus/aozora_wikipedia_mixed.txt (約 200x の拡大、 Chinchilla 則寄せ)
+    //   - tokenizer: tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin (vocab=32,009、 chars/token Aozora 1.795 / Wiki 1.873)
+    //   - shape: d_model 768, n_heads 12, d_ff 3072, n_layers 8 (Phase 5-4c 予約スケール)
+    //   - LR: WSD (warmup 500 + stable 8000 + decay 1500 = 10,000)、 lr_max 5e-4 (50M params 用に 7e-4 → 下げ)
+    //   - 観測: log 50 step / save+val 500 step (長期 run のため間隔拡大)
+    //   - 計算量見積: ~17-20s/step × 10,000 = ~50 時間 ≈ 2 日 (M1 Max + Accelerate)
+    //   起動コマンド (確認用 dry run 推奨):
+    //     cargo run --release 2>&1 | tee logs/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd.log
+    //   起動前チェック: tokenizer cache hit を必ず確認 (cache miss だと 110 分の BPE 再訓練が走る)。
+    let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
+    training_and_inference(&cfg);  // ← 起動するときはコメントを外す
+
+    // 起動前 dry run: tokenizer cache hit と corpus サイズだけ確認したい場合は次行のみ有効化:
+    // bench_tokenizer_with_cache(&cfg);
+
+    // Phase 7-a (clean retry): Phase 6-d と同形状 + **完全クレンジング済 v2 corpus** + **special token (作家・戯曲)** + **Phase 7-4 高速化バイナリ**。 ✅ 完了
     //   - corpus: corpus/aozora_meiji_taisho_v2.txt (504 作品、 旧 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
     //             戯曲 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1,764 行 + 編集者注釈 33 個を除去 = Phase 7-1-B 第 1-10 弾)
     //   - tokenizer: tokenizers/charbpe_v8010_aozora_meiji_taisho_v2_s500000.bin
     //                (クリーン v2 で CharBPE を再訓練、 vocab=8009 = 8000 BPE + 9 specials。 `</TITLE>` は BPE merge と衝突して重複追加なし)
     //   - LR: WSD (warmup=300, stable=2160, decay=540) — Phase 6-d と同
-    //   - 高速化: Phase 7-3 (matmul_t1/t2 で transpose materialize 排除、 1.12x vs 7-2)
-    //            + Phase 7-4 (fused matmul-add + scores.clone 削除 + softmax backward in-place、 1.43x vs 7-3)
-    //            累積 1.59x vs 7-2、 Phase 6-d 実測 ~9,200 ms/step → ~5,800 ms/step 想定
-    //   なお初回 (pre-clean) は step 780 まで進めて停止 (val_ppl 100 @ step 600)、 クレンジング完了後に再起動 → checkpoints/..._pre_clean_aborted_step780/ に退避
-    //   期待: total ~5 h、 BPC 4.22 → 3.9-4.1 (-3〜-7%)、 戯曲混入と作家ミックスとヘッダ生成の構造的解消。
-    let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
-    // training_and_inference(&cfg);
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2/best.bin",
-    );
+    //   - 高速化: Phase 7-3 + Phase 7-4 累積 1.59x vs 7-2
+    //   結果: best step=2800 val_loss 4.3443, val_ppl 77.04, BPC 4.291 (val 基準)。
+    //         Phase 6-d (val_ppl 71.81) より僅かに劣るが、 生成サンプルは作家別文体が再現され良好。
+    //   推論時は次行を有効化して checkpoint から sample 生成:
+    // let cfg = Config::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2/best.bin",
+    // );
 
     // Phase 6-d: Phase 6-c と同形状 + WSD scheduler + Phase 7-1/7-2 (Matrix 直叩き + QKV 融合) 高速化。 ✅ 完了
     //   best val_loss 4.274018 @ step 2800, val_ppl 71.81, bpc 4.22 (val 基準) / 3.74 (full-corpus 基準)

@@ -19,7 +19,7 @@ Phase 8-1 (コーパス) → 8-2 (tokenizer) → 8-3 (model) の順で着手。
 
 ## サブフェーズ
 
-### Phase 8-1: コーパス拡大 (Aozora + Wikipedia 日本語版 混合) — 🟡 進行中
+### Phase 8-1: コーパス拡大 (Aozora + Wikipedia 日本語版 混合) — 🟡 [E] 起動待ち
 
 #### [A] Wikipedia 日本語版の取得 ✅ 完了 (2026-05-13)
 
@@ -71,33 +71,47 @@ Phase 8-1 (コーパス) → 8-2 (tokenizer) → 8-3 (model) の順で着手。
 - **学習時の挙動**: chunk_len=1024 のスライディングウィンドウで random sampling → Aozora 由来の窓は ~0.84% 程度 (= 3000 step × batch 16 ≒ 48000 窓 中 ~400 窓)。 Wikipedia 主体だが文学的文体の信号は維持される想定。
 - **注**: Aozora の重み付けが不足だった場合、 `REPEAT_AOZORA` を 5-20 に上げて再生成可能。 Phase 8-1 [E] 実行後の生成品質を見て判断する。
 
-#### [D] CharBPE vocab 8K → 32K 再訓練 🟡 実装済 / Phase 7-a 完走後に実行
+#### [D] CharBPE vocab 8K → 32K 再訓練 ✅ 完了 (2026-05-14)
 
 - **実装**: `src/bin/train_tokenizer_phase8.rs`
-- **入力 coverage_text**: `corpus/aozora_wikipedia_mixed.txt` 全体 (~983M char、 unique char ~15.8K)
-- **入力 merge_text**: stratified sample (Aozora 先頭 500K chars + Wikipedia 先頭 1.5M chars = **2M chars**)
+- **入力 coverage_text**: `corpus/aozora_wikipedia_mixed.txt` 全体 (983,007,772 char、 unique char ~15.8K)
+- **入力 merge_text**: stratified sample (Aozora 先頭 500K chars + Wikipedia 先頭 1.5M chars = **2,000,002 chars**)
   - Aozora の `<BOS><AUTHOR=...><TITLE>...</TITLE>` 区切りパターンと Wikipedia の現代日本語 + 英数記号の両方を BPE merge が学習できるよう構成
-- **target vocab**: 32,000 (BPE) + 10 special token = **32,010**
+- **target vocab**: 32,000 (BPE) + 10 special token = **32,010** 想定 → **実 32,009** (`</TITLE>` が BPE merge と衝突して既存 id=18334 を再利用、 重複追加なし)
 - **special tokens**: Phase 7-1 と同一 10 個 (`<TITLE>` / `</TITLE>` / `<DRAMA>` / `</DRAMA>` + 6 作家)
-- **期待 chars/token**:
-  - Aozora 部分: 1.7-1.9 (現 8K で 1.46)
-  - Wikipedia 部分: 1.6-1.8 (英数 + 漢字混在で BPE が効きやすい)
-- **出力**: `tokenizers/charbpe_v32010_aozora_wikipedia.bin`
-- **学習時間予測**:
-  - Phase 7-a と並走時: ~70-100 分 (CPU 競合で BPE merge ループが遅い)
-  - **単独実行時 (Phase 7-a 完走後)**: ~30-50 分 (rayon 10 コア使用可)
-- **初回試行ログ**: Phase 7-a 並走中に起動して 11 分稼働後に中断 (`logs/train_tokenizer_phase8.log`)。
-  CPU 競合が Phase 7-a per-step を 7,700ms → 10,000ms に押し上げたため、 完走後の単独実行に切替えた。
+- **実測 chars/token** (50K char サンプル):
+  - Aozora: **1.795** (Phase 7-a 8K の 1.46 から +23%)
+  - Wikipedia: **1.873** (英数 + 漢字混在で BPE が効く)
+- **出力**: `tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin`
+  (Phase 8-1 [E] config の `tokenizer_cache_path()` に合わせて元の `charbpe_v32010_aozora_wikipedia.bin` からリネーム)
+- **学習時間**:
+  - 初回試行 (Phase 7-a 並走): 11 分稼働後に中断 (CPU 競合で per-step が 7,700ms → 10,000ms に劣化)
+  - **正式実行 (Phase 7-a 完走後の単独実行)**: 110.8 分 (rayon フル稼働)
+- **動作確認**: 混合コーパス先頭の `<BOS><AUTHOR=国木田独歩><TITLE>あの時分</TITLE>` が special token として正しく解釈
 
-#### [E] Phase 8 config 追加 + 学習起動 ⏳ 未着手
+#### [E] Phase 8 config 追加 + 学習起動 — 🟡 config 実装済 / 起動待ち
 
-- `Config::aozora_wikipedia_d768_n8_charbpe32k_max1024_wsd()` を `main.rs` に追加
-- パラメタ: d=768, n_heads=12, n_layers=8, d_ff=3072, max_len=1024, vocab=32010, batch=16
-- 期待 params: ~50M
-- end_step: 5000-8000 (Wikipedia 規模で 1-2 epoch)
-- 期待 BPC: 3.5-3.8 (Aozora v2 7-a 比 -15% 〜 -17%)
-- per-step 予測: 18-25 s (Phase 7-5 binary、 d=768 で AMX 効率向上)
-- 完走時間予測: 25-40 h (連続稼働)
+- **config method**: `Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` (`src/main.rs`)
+- **run_name**: `phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd`
+- **パラメタ**:
+  - shape: d=768, n_heads=12, n_layers=8, d_ff=3072, max_len=1024 → ~50M params (Phase 5-4c 予約スケール)
+  - vocab=32,010 (cfg側、 実 tokenizer 32,009)
+  - batch_size=16
+  - lr_max=5e-4, lr_min=5e-5, warmup_steps=500 (Phase 7-a の 7e-4 から GPT-2 small 慣例に合わせ控えめに)
+  - **WSD**: warmup 500 + stable 8000 + decay 1500 = **end_step 10,000** (decay 比 15%、 Phase 6-d の 18% より緩め)
+  - 観測: log 50 step / save+val 500 step (長期 run のため間隔拡大)
+- **計算量見積**:
+  - per-step: ~17-20 s (Phase 7-a ~7,700 ms から params 2.4x + d² 比例な部分で約 2.2-2.6x)
+  - 10,000 steps × ~18 s ≈ **50 時間 ≈ 2 日** (M1 Max + Accelerate)
+- **期待**:
+  - val_ppl は corpus 領域差 (Wikipedia 主体) で Phase 7-a と直接比較不能、 BPC を主指標に。
+  - 期待 BPC: 3.5-3.8 (Aozora v2 7-a 比 -15% 〜 -17%)。
+  - Wikipedia の説明文体、 人物名・歴史的事実・カタカナ概念の生成品質が主観的評価ポイント。
+- **起動コマンド** (確認後にコメントアウトを外して実行):
+  ```bash
+  cargo run --release 2>&1 | tee logs/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd.log
+  ```
+  起動前に `# loaded cached tokenizer from tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin (vocab=32009)` のログを必ず確認 (cache miss だと 110 分の BPE 再訓練が走る)。
 
 ### Phase 8-2 / 8-3 (将来): bf16 mixed precision + GPT-2 Small Compact
 
