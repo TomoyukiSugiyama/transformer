@@ -101,7 +101,10 @@ fn main() -> std::io::Result<()> {
 
     // [4] special token 追加
     println!();
-    println!("# 追加する special token ({} 個):", NEW_SPECIAL_TOKENS.len());
+    println!(
+        "# 追加する special token ({} 個):",
+        NEW_SPECIAL_TOKENS.len()
+    );
     for tok in NEW_SPECIAL_TOKENS {
         let id = tokenizer.add_special_token(tok);
         println!("  id={id:>5}  {tok}");

@@ -12,6 +12,8 @@
 //! 注: 学習側は `chunk_len` 単位のスライディングウィンドウなので、
 //! 入力テキスト中の Aozora 部分と Wikipedia 部分の境界は問題にならない。
 //! Aozora の `<BOS><AUTHOR=...><TITLE>...</TITLE>` special token も維持される。
+//!
+//! 実行: cargo run --release --bin mix_corpus
 
 use std::fs;
 use std::io::{BufWriter, Write};

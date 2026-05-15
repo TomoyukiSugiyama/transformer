@@ -12,6 +12,8 @@
 //! 4. 記事末尾の連続空行を全削除。
 //! 5. 短い記事 (< MIN_CHARS) を破棄。
 //! 6. 記事の区切りは `\n\n` (1 空行) を使う。 連続改行は不要。
+//!
+//! 実行: cargo run --release --bin clean_wikipedia_corpus
 
 use std::fs::File;
 use std::io::{BufWriter, Write};

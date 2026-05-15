@@ -34,9 +34,12 @@ use std::time::Instant;
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
-    adam_w::AdamW, feed_forward::FeedForwardKind, language_model::LanguageModel,
+    adam_w::AdamW,
+    feed_forward::FeedForwardKind,
+    language_model::LanguageModel,
     lr_scheduler::{LrScheduleKind, LrScheduler},
-    normalization::NormalizationKind, positional_encoding::PositionalEncodingKind,
+    normalization::NormalizationKind,
+    positional_encoding::PositionalEncodingKind,
     tokenizer::{
         Tokenizer, TokenizerKind, load_tokenizer_from_file, save_tokenizer_to_file,
         train_tokenizer, train_tokenizer_with_coverage,
@@ -98,7 +101,12 @@ fn build_or_load_tokenizer(cfg: &Config, corpus_text: &str) -> Box<dyn Tokenizer
             sample_text.chars().count(),
             corpus_text.chars().count(),
         );
-        train_tokenizer_with_coverage(cfg.tokenizer_kind, &sample_text, corpus_text, cfg.vocab_size)
+        train_tokenizer_with_coverage(
+            cfg.tokenizer_kind,
+            &sample_text,
+            corpus_text,
+            cfg.vocab_size,
+        )
     } else {
         println!(
             "# training tokenizer: kind={:?}, vocab_size={} (full corpus, {} chars)",
@@ -561,7 +569,8 @@ impl Config {
     #[allow(dead_code)]
     fn aozora_meiji_taisho_charbpe8k_max1024_wsd_v2() -> Self {
         let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024_wsd();
-        cfg.run_name = "phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2";
+        cfg.run_name =
+            "phase7a_aozora_meiji_taisho_d512_n6_charbpe8k_rms_swiglu_rope_max1024_wsd_v2";
         cfg.corpus_path = "corpus/aozora_meiji_taisho_v2.txt";
         // 8010: 8000 BPE merges + 9 new specials (</TITLE> は BPE merge と衝突して重複追加なし、 実 vocab=8009)。
         // ただし `tokenizer_cache_path()` が cfg.vocab_size をファイル名に使う都合上、 cache 命名と整合させるため
@@ -602,7 +611,8 @@ impl Config {
     #[allow(dead_code)]
     fn aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd() -> Self {
         let mut cfg = Self::aozora_meiji_taisho_charbpe8k_max1024_wsd_v2();
-        cfg.run_name = "phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd";
+        cfg.run_name =
+            "phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd";
         cfg.corpus_path = "corpus/aozora_wikipedia_mixed.txt";
         // 32010: 32000 BPE merges + 9 new specials (</TITLE> は BPE merge と衝突して重複追加なし、 実 vocab=32009)。
         // tokenizer_cache_path() が cfg.vocab_size をファイル名に使う都合上、 リネーム済キャッシュと整合させるため 32010 のまま。
@@ -625,7 +635,9 @@ impl Config {
         // 学習量: 10,000 steps (Phase 7-a の 3,000 から 3.3x)。
         // WSD: warmup 500 + stable 8,000 + decay 1,500 = 10,000 (decay 比 15%、 Phase 6-d の 18% より緩め)。
         cfg.end_step = 10_000;
-        cfg.lr_schedule_kind = LrScheduleKind::WarmupStableDecay { stable_steps: 8_000 };
+        cfg.lr_schedule_kind = LrScheduleKind::WarmupStableDecay {
+            stable_steps: 8_000,
+        };
 
         // 観測頻度: 長期 run のため間隔を伸ばす (log 50 step、 save 500 step)。
         // val は同じ 200 step 間隔のままだと 50 回計測でログが煩雑になるので 500 step に。
@@ -676,6 +688,10 @@ fn main() {
     //   起動前チェック: tokenizer cache hit を必ず確認 (cache miss だと 110 分の BPE 再訓練が走る)。
     let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
     // training_and_inference(&cfg);  // ← 起動するときはコメントを外す
+    // training_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/step_006000.bin",
+    // );
     inference_from_checkpoint(
         &cfg,
         "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/best.bin",
@@ -1007,14 +1023,7 @@ fn training_and_inference(cfg: &Config) {
     opt.set_beta2(cfg.beta2);
     let mut rng = SmallRng::seed_from_u64(42);
     run_training_loop(
-        &mut model,
-        &mut opt,
-        &mut rng,
-        &token_ids,
-        &val_ids,
-        val_chars,
-        cfg,
-        1,
+        &mut model, &mut opt, &mut rng, &token_ids, &val_ids, val_chars, cfg, 1,
     );
     let inference_path = format!("{}/inference.bin", cfg.checkpoint_dir());
     model.save_inference_checkpoint(&inference_path).unwrap();
@@ -1188,6 +1197,9 @@ fn bench_tokenizer_with_cache(cfg: &Config) {
     if cfg.tokenizer_kind == TokenizerKind::CharBpe {
         // tokenizer は Box<dyn Tokenizer> なので concrete メソッドは呼べない。
         // merge 例はキャッシュファイルに保存された情報からも辿れるので、 別途確認すれば良い。
-        println!("\n# (top merges: see {} or rerun bench with concrete CharBpeTokenizer)", cfg.tokenizer_cache_path());
+        println!(
+            "\n# (top merges: see {} or rerun bench with concrete CharBpeTokenizer)",
+            cfg.tokenizer_cache_path()
+        );
     }
 }

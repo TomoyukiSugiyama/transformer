@@ -71,8 +71,10 @@ fn main() -> std::io::Result<()> {
         *author_chars.entry(author.clone()).or_insert(0) += current_work_chars;
     }
 
-    out!("ヘッダ行 自体の char 数: {header_total_chars} ({:.3}%)",
-         header_total_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "ヘッダ行 自体の char 数: {header_total_chars} ({:.3}%)",
+        header_total_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
     out!("作家別 (作品数 / char 数):");
     let mut authors: Vec<(&String, &usize)> = author_works.iter().collect();
@@ -82,21 +84,33 @@ fn main() -> std::io::Result<()> {
     for (author, works) in &authors {
         let chars = author_chars.get(*author).copied().unwrap_or(0);
         let pct = chars as f64 * 100.0 / total_chars as f64;
-        out!("  {} : {:>3} 作 / {:>10} char ({:>5.2}%)", author, works, chars, pct);
+        out!(
+            "  {} : {:>3} 作 / {:>10} char ({:>5.2}%)",
+            author,
+            works,
+            chars,
+            pct
+        );
         sum_works += **works;
         sum_chars += chars;
     }
-    out!("  -- 合計 {} 作家 / {} 作 / {} char ({:.2}%)",
-         authors.len(), sum_works, sum_chars,
-         sum_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "  -- 合計 {} 作家 / {} 作 / {} char ({:.2}%)",
+        authors.len(),
+        sum_works,
+        sum_chars,
+        sum_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
 
     // ----- 2. 振り仮名 《...》 -----
     out!("--- 2. 振り仮名 《...》 ---");
     let (ruby_count, ruby_chars) = count_pattern(&corpus, '《', '》');
     out!("出現数: {ruby_count}");
-    out!("消費 char 数 (区切り文字含む): {ruby_chars} ({:.3}%)",
-         ruby_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "消費 char 数 (区切り文字含む): {ruby_chars} ({:.3}%)",
+        ruby_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
 
     // ----- 3. 注釈マーカ ［＃...］ -----
@@ -116,12 +130,18 @@ fn main() -> std::io::Result<()> {
             }
         }
         // 1 char 進める (UTF-8 char boundary)
-        let ch_len = corpus[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let ch_len = corpus[i..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
         i += ch_len;
     }
     out!("出現数: {annot_count}");
-    out!("消費 char 数: {annot_chars} ({:.3}%)",
-         annot_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "消費 char 数: {annot_chars} ({:.3}%)",
+        annot_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
 
     // ----- 4. 戯曲台詞行の検出 -----
@@ -138,8 +158,10 @@ fn main() -> std::io::Result<()> {
         }
     }
     out!("検出行数: {drama_line_count}");
-    out!("char 数: {drama_line_chars} ({:.3}%)",
-         drama_line_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "char 数: {drama_line_chars} ({:.3}%)",
+        drama_line_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
 
     // ----- 5. ト書き行 (行頭が () もしくは （） で始まる) -----
@@ -154,8 +176,10 @@ fn main() -> std::io::Result<()> {
         }
     }
     out!("検出行数: {stage_count}");
-    out!("char 数: {stage_chars} ({:.3}%)",
-         stage_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "char 数: {stage_chars} ({:.3}%)",
+        stage_chars as f64 * 100.0 / total_chars as f64
+    );
     out!("");
 
     // ----- 6. 行長分布 -----
@@ -175,8 +199,16 @@ fn main() -> std::io::Result<()> {
         };
         bins[b] += 1;
     }
-    let labels = ["0 char (空行)", "1-9 char", "10-49 char", "50-199 char",
-                  "200-499 char", "500-999 char", "1000-1999 char", "2000+ char"];
+    let labels = [
+        "0 char (空行)",
+        "1-9 char",
+        "10-49 char",
+        "50-199 char",
+        "200-499 char",
+        "500-999 char",
+        "1000-1999 char",
+        "2000+ char",
+    ];
     for (i, label) in labels.iter().enumerate() {
         let pct = bins[i] as f64 * 100.0 / total_lines as f64;
         out!("  {:>16}: {:>7} 行 ({:>5.2}%)", label, bins[i], pct);
@@ -211,27 +243,50 @@ fn main() -> std::io::Result<()> {
         br.partial_cmp(&ar).unwrap_or(std::cmp::Ordering::Equal)
     });
     for w in sorted.iter().take(20) {
-        out!("  {:>5.2}%  ({:>4}/{:>4} 行)  {}",
-             w.drama_ratio() * 100.0, w.drama_count, w.line_count, w.title);
+        out!(
+            "  {:>5.2}%  ({:>4}/{:>4} 行)  {}",
+            w.drama_ratio() * 100.0,
+            w.drama_count,
+            w.line_count,
+            w.title
+        );
     }
     out!("");
 
     // ----- まとめ -----
     out!("=== サマリ ===");
     out!("クレンジング候補の合計 char 数:");
-    out!("  作家ヘッダ          : {:>10} ({:>5.3}%)", header_total_chars,
-         header_total_chars as f64 * 100.0 / total_chars as f64);
-    out!("  振り仮名 《...》    : {:>10} ({:>5.3}%)", ruby_chars,
-         ruby_chars as f64 * 100.0 / total_chars as f64);
-    out!("  注釈 ［＃...］      : {:>10} ({:>5.3}%)", annot_chars,
-         annot_chars as f64 * 100.0 / total_chars as f64);
-    out!("  戯曲台詞行          : {:>10} ({:>5.3}%)", drama_line_chars,
-         drama_line_chars as f64 * 100.0 / total_chars as f64);
-    out!("  ト書き行            : {:>10} ({:>5.3}%)", stage_chars,
-         stage_chars as f64 * 100.0 / total_chars as f64);
+    out!(
+        "  作家ヘッダ          : {:>10} ({:>5.3}%)",
+        header_total_chars,
+        header_total_chars as f64 * 100.0 / total_chars as f64
+    );
+    out!(
+        "  振り仮名 《...》    : {:>10} ({:>5.3}%)",
+        ruby_chars,
+        ruby_chars as f64 * 100.0 / total_chars as f64
+    );
+    out!(
+        "  注釈 ［＃...］      : {:>10} ({:>5.3}%)",
+        annot_chars,
+        annot_chars as f64 * 100.0 / total_chars as f64
+    );
+    out!(
+        "  戯曲台詞行          : {:>10} ({:>5.3}%)",
+        drama_line_chars,
+        drama_line_chars as f64 * 100.0 / total_chars as f64
+    );
+    out!(
+        "  ト書き行            : {:>10} ({:>5.3}%)",
+        stage_chars,
+        stage_chars as f64 * 100.0 / total_chars as f64
+    );
     let cleansable = ruby_chars + annot_chars + drama_line_chars + stage_chars;
-    out!("  -- 合計 (重複あり)  : {:>10} ({:>5.3}%)", cleansable,
-         cleansable as f64 * 100.0 / total_chars as f64);
+    out!(
+        "  -- 合計 (重複あり)  : {:>10} ({:>5.3}%)",
+        cleansable,
+        cleansable as f64 * 100.0 / total_chars as f64
+    );
 
     fs::write(REPORT_PATH, &report)?;
     println!("\n→ レポートを {REPORT_PATH} に保存しました");

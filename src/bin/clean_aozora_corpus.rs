@@ -37,7 +37,10 @@ const DRAMA_MIN_LINES: usize = 20;
 
 /// 章番号として扱う漢数字 (`〇` 「ゼロ」 を含む)。 「百」「千」 はタイトル本文への混在リスクがあるので含めない。
 fn is_chapter_kanji_digit(c: char) -> bool {
-    matches!(c, '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十' | '〇')
+    matches!(
+        c,
+        '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十' | '〇'
+    )
 }
 
 const BOS: &str = "<BOS>";
@@ -125,29 +128,46 @@ fn main() -> std::io::Result<()> {
 
     r!("=== Phase 7-1-B クレンジング結果 ===");
     r!("入力: {INPUT_PATH} ({total_in_chars} chars)");
-    r!("出力: {OUTPUT_PATH} ({total_out_chars} chars, {:+.2}%)",
-       (total_out_chars as i64 - total_in_chars as i64) as f64 * 100.0 / total_in_chars as f64);
+    r!(
+        "出力: {OUTPUT_PATH} ({total_out_chars} chars, {:+.2}%)",
+        (total_out_chars as i64 - total_in_chars as i64) as f64 * 100.0 / total_in_chars as f64
+    );
     r!("");
     r!("--- クレンジング操作 ---");
-    r!("  作家ヘッダ (===== ... =====) → <BOS><AUTHOR=...><TITLE>...</TITLE>: 全 {} 行", works.len());
+    r!(
+        "  作家ヘッダ (===== ... =====) → <BOS><AUTHOR=...><TITLE>...</TITLE>: 全 {} 行",
+        works.len()
+    );
     r!("  章番号行削除 (`　　　五`, `一`, `第二巻` 等): {total_removed_chapters} 行");
     r!("  編集者注釈除去 (`〔以下空白〕`, `〔一字不明〕` 等): {total_removed_annotations} 個");
     r!("");
     r!("--- 作品分類 ---");
-    r!("  戯曲扱い (DRAMA で囲む): {drama_count} 作 / {drama_chars} char ({:.2}%)",
-       drama_chars as f64 * 100.0 / total_in_chars as f64);
-    r!("  散文扱い:                 {} 作 / {} char ({:.2}%)",
-       works.len() - drama_count, prose_chars,
-       prose_chars as f64 * 100.0 / total_in_chars as f64);
+    r!(
+        "  戯曲扱い (DRAMA で囲む): {drama_count} 作 / {drama_chars} char ({:.2}%)",
+        drama_chars as f64 * 100.0 / total_in_chars as f64
+    );
+    r!(
+        "  散文扱い:                 {} 作 / {} char ({:.2}%)",
+        works.len() - drama_count,
+        prose_chars,
+        prose_chars as f64 * 100.0 / total_in_chars as f64
+    );
     r!("");
     r!("--- 戯曲扱いになった作品 ---");
-    let mut drama_works: Vec<&Work> = works.iter()
+    let mut drama_works: Vec<&Work> = works
+        .iter()
         .filter(|w| w.drama_ratio() >= DRAMA_THRESHOLD && w.line_count() >= DRAMA_MIN_LINES)
         .collect();
     drama_works.sort_by(|a, b| b.drama_ratio().partial_cmp(&a.drama_ratio()).unwrap());
     for w in &drama_works {
-        r!("  {:>5.1}% ({:>3}/{:>3} 行)  {} 『{}』",
-           w.drama_ratio() * 100.0, w.drama_count(), w.line_count(), w.author, w.title);
+        r!(
+            "  {:>5.1}% ({:>3}/{:>3} 行)  {} 『{}』",
+            w.drama_ratio() * 100.0,
+            w.drama_count(),
+            w.line_count(),
+            w.author,
+            w.title
+        );
     }
     r!("");
     r!("--- 作家別 char 分布 (新コーパス) ---");
@@ -156,7 +176,13 @@ fn main() -> std::io::Result<()> {
     stats.sort_by(|a, b| b.1.1.cmp(&a.1.1));
     for (author, (works_n, chars)) in &stats {
         let pct = *chars as f64 * 100.0 / total_body_chars as f64;
-        r!("  {:<10} {:>3} 作  {:>10} char ({:>5.2}%)", author, works_n, chars, pct);
+        r!(
+            "  {:<10} {:>3} 作  {:>10} char ({:>5.2}%)",
+            author,
+            works_n,
+            chars,
+            pct
+        );
     }
     r!("");
     r!("--- 追加すべき special token (12 個) ---");
@@ -458,10 +484,7 @@ fn is_chapter_number_line(line: &str) -> bool {
     }
 
     // パターン 6: `※X※` (X = 漢数字 1-3 文字 または 上/中/下/前/後)
-    if chars.len() >= 3
-        && chars.len() <= 5
-        && chars[0] == '※'
-        && *chars.last().unwrap() == '※'
+    if chars.len() >= 3 && chars.len() <= 5 && chars[0] == '※' && *chars.last().unwrap() == '※'
     {
         let middle = &chars[1..chars.len() - 1];
         if middle
@@ -478,12 +501,9 @@ fn is_chapter_number_line(line: &str) -> bool {
         .filter(|&&c| !matches!(c, ' ' | '　' | '\t'))
         .collect();
     let stripped_len = stripped.chars().count();
-    let all_decorative = stripped.chars().all(|c| {
-        matches!(
-            c,
-            '＊' | '*' | '×' | '※' | '―' | '─' | '━'
-        )
-    });
+    let all_decorative = stripped
+        .chars()
+        .all(|c| matches!(c, '＊' | '*' | '×' | '※' | '―' | '─' | '━'));
     let has_strong_decorative = stripped
         .chars()
         .any(|c| matches!(c, '＊' | '*' | '×' | '※'));
@@ -497,7 +517,10 @@ fn is_chapter_number_line(line: &str) -> bool {
     // パターン 3: 「第X章/巻/回/節/編/部/話/卷」
     if chars.len() <= 6 && chars[0] == '第' {
         let suffix = chars.last().copied().unwrap_or(' ');
-        if matches!(suffix, '章' | '節' | '部' | '編' | '話' | '巻' | '卷' | '回') {
+        if matches!(
+            suffix,
+            '章' | '節' | '部' | '編' | '話' | '巻' | '卷' | '回'
+        ) {
             let middle = &chars[1..chars.len() - 1];
             if !middle.is_empty()
                 && middle.iter().all(|&c| {
@@ -534,9 +557,8 @@ fn is_chapter_number_line(line: &str) -> bool {
                 let title_len = title_trimmed.chars().count();
                 if title_len >= 1
                     && title_len <= 25
-                    && !title_trimmed.contains([
-                        '。', '、', '？', '！', '」', '』', '）', ')', '?', '!',
-                    ])
+                    && !title_trimmed
+                        .contains(['。', '、', '？', '！', '」', '』', '）', ')', '?', '!'])
                 {
                     return true;
                 }
@@ -589,9 +611,7 @@ fn is_chapter_number_line(line: &str) -> bool {
         && matches!(*chars.last().unwrap(), '）' | ')')
     {
         let middle = &chars[1..chars.len() - 1];
-        if !middle.is_empty()
-            && middle.iter().all(|&c| is_extended_chapter_kanji_digit(c))
-        {
+        if !middle.is_empty() && middle.iter().all(|&c| is_extended_chapter_kanji_digit(c)) {
             return true;
         }
     }
@@ -681,14 +701,30 @@ mod tests {
 
     #[test]
     fn chapter_kanji_digit_only() {
-        for s in ["一", "二", "三", "十", "〇", "　　　　　五", "　二十", "　　　九"] {
+        for s in [
+            "一",
+            "二",
+            "三",
+            "十",
+            "〇",
+            "　　　　　五",
+            "　二十",
+            "　　　九",
+        ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
         }
     }
 
     #[test]
     fn chapter_dai_x_suffix() {
-        for s in ["第一章", "第二回", "第三節", "第十巻", "第百話", "　　第二編"] {
+        for s in [
+            "第一章",
+            "第二回",
+            "第三節",
+            "第十巻",
+            "第百話",
+            "　　第二編",
+        ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
         }
     }
@@ -730,7 +766,17 @@ mod tests {
     #[test]
     fn chapter_arabic_digits() {
         for s in [
-            "１", "２", "３", "４", "５", "10", "12", "１２", "1234", "　　　３", "　　　２０",
+            "１",
+            "２",
+            "３",
+            "４",
+            "５",
+            "10",
+            "12",
+            "１２",
+            "1234",
+            "　　　３",
+            "　　　２０",
         ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
         }
@@ -784,7 +830,7 @@ mod tests {
             "　　　　第六",
             "　第三",
             "　　第十",
-            "第一",   // leading whitespace なし (第 9 弾)
+            "第一", // leading whitespace なし (第 9 弾)
             "第二",
             "第百",
         ] {
@@ -800,7 +846,7 @@ mod tests {
             "（百）",
             "　　　（二）",
             "　　　　（三）",
-            "(一)",     // ASCII 括弧
+            "(一)", // ASCII 括弧
             "（十）",
         ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
@@ -809,11 +855,7 @@ mod tests {
 
     #[test]
     fn chapter_single_fullwidth_latin() {
-        for s in [
-            "Ａ", "Ｂ", "Ｃ", "Ｚ",
-            "　　　　　　　　Ａ",
-            " Ｂ",
-        ] {
+        for s in ["Ａ", "Ｂ", "Ｃ", "Ｚ", "　　　　　　　　Ａ", " Ｂ"] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
         }
     }
@@ -862,7 +904,12 @@ mod tests {
     #[test]
     fn chapter_komejirushi_wrap() {
         for s in [
-            "※一※", "※二※", "※三※", "※下※", "※上※", "※中※",
+            "※一※",
+            "※二※",
+            "※三※",
+            "※下※",
+            "※上※",
+            "※中※",
             "　　　　　　※五※",
         ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
@@ -873,7 +920,7 @@ mod tests {
     fn chapter_decorative_separator() {
         for s in [
             "　　　　　＊　　　　　＊　　　　　＊",
-            "　　　　　＊　　　　　＊",                   // 装飾文字 A は 2 個でも区切り
+            "　　　　　＊　　　　　＊", // 装飾文字 A は 2 個でも区切り
             "　　　　　×　　　　×　　　　×",
             "　　　　　――――――――――――",
             "＊＊＊",
@@ -884,8 +931,8 @@ mod tests {
             "―――",
             "──────",
             "＊　×　＊", // mixed A
-            "※　※　※", // ※ space ※ space ※
-            "※※",       // ※ 2 個
+            "※　※　※",   // ※ space ※ space ※
+            "※※",        // ※ 2 個
         ] {
             assert!(is_chapter_number_line(s), "should match: {s:?}");
         }
@@ -896,11 +943,23 @@ mod tests {
         let cases = [
             ("四月九日〔以下空白〕", "四月九日"),
             ("一九二六、五、一九、〔以下空白〕", "一九二六、五、一九、"),
-            ("おや〔一字不明〕、川へはいっちゃいけないったら。", "おや、川へはいっちゃいけないったら。"),
-            ("　ただ林の濶い木の葉がぱちぱち鳴っている〔以下原稿数枚？なし〕", "　ただ林の濶い木の葉がぱちぱち鳴っている"),
-            ("「そうです、先生。」〔以下原稿数枚なし〕", "「そうです、先生。」"),
+            (
+                "おや〔一字不明〕、川へはいっちゃいけないったら。",
+                "おや、川へはいっちゃいけないったら。",
+            ),
+            (
+                "　ただ林の濶い木の葉がぱちぱち鳴っている〔以下原稿数枚？なし〕",
+                "　ただ林の濶い木の葉がぱちぱち鳴っている",
+            ),
+            (
+                "「そうです、先生。」〔以下原稿数枚なし〕",
+                "「そうです、先生。」",
+            ),
             ("〔冒頭原稿数枚焼失〕本文がはじまる。", "本文がはじまる。"),
-            ("一千九百二十六年三月廿〔一字分空白〕日、", "一千九百二十六年三月廿日、"),
+            (
+                "一千九百二十六年三月廿〔一字分空白〕日、",
+                "一千九百二十六年三月廿日、",
+            ),
         ];
         for (input, expected) in cases {
             let (out, n) = strip_editorial_annotations(input);
@@ -918,7 +977,7 @@ mod tests {
             "〔ve'rite' vraie.〕 なんでも事実でなければ",
             "「〔Keine Bru:cke fu:hrt von Mensch zu Mensch.〕（人から人へ掛け渡す橋はない）」",
             "〔二十分停車〕と時計の下に書いてありました。", // 看板内容 (本文)
-            "〔ほう。戻れ。ほう。〕",                          // 台詞 (本文)
+            "〔ほう。戻れ。ほう。〕",                       // 台詞 (本文)
         ];
         for input in cases {
             let (out, n) = strip_editorial_annotations(input);
@@ -934,7 +993,7 @@ mod tests {
             "下りて来た",
             "中の事情",
             "これは本文の一部である。",
-            "(1)",   // 全角数字ではないので パターン 14 にもマッチしない
+            "(1)", // 全角数字ではないので パターン 14 にもマッチしない
             "「上」と書かれていた",
             "※印は脚注を意味する",
             "上下",
@@ -947,18 +1006,18 @@ mod tests {
             "夏目漱石は明治に活躍した作家である。",
             "百",   // 単独「百」は本文 (100 を意味する用法)
             "千",   // 単独「千」も本文用法あり
-            "百年",  // 「百」「千」は単独以外でも一-九/十/〇 を含まないとマッチしない
+            "百年", // 「百」「千」は単独以外でも一-九/十/〇 を含まないとマッチしない
             "千万",
             "　　　二人の旅人が現れた。", // 句読点を含むので章番号扱いしない
-            "　二郎",                    // leading whitespace 1 つでは本文段落扱い
+            "　二郎",                     // leading whitespace 1 つでは本文段落扱い
             "第一次世界大戦",             // chars.len()=7 > 4 → 本文扱い
-            "ＡとＢ",                    // 2 文字以上の Ａ-Ｚ → 本文扱い
-            "Ａ社",                      // Ａ + 漢字 → 本文扱い
+            "ＡとＢ",                     // 2 文字以上の Ａ-Ｚ → 本文扱い
+            "Ａ社",                       // Ａ + 漢字 → 本文扱い
             "第一場と同じ日。",           // 末尾句読点 → 本文ト書き
             "　　　一、金　二両　山椒皮　一俵", // タイトル内に全角空白 → 帳簿 (本文)
-            "〇、〇〇〇七六粍",          // 一-九/十 の数字を含まない → 本文 (数値表記)
+            "〇、〇〇〇七六粍",           // 一-九/十 の数字を含まない → 本文 (数値表記)
             "そのため、彼は",             // 「その + 漢数字以外」 は本文
-            "そのこと",                  // 「その + 漢数字以外」 は本文
+            "そのこと",                   // 「その + 漢数字以外」 は本文
         ] {
             assert!(!is_chapter_number_line(s), "should NOT match: {s:?}");
         }

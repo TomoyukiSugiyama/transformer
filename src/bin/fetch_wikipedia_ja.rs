@@ -16,6 +16,7 @@
 //! ```
 //!
 //! `<DOC_SEP>` は後段クレンジングで使う目印トークン。 学習時には除去・置換する。
+//! 実行: cargo run --release --features corpus-tools --bin fetch_wikipedia_ja
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};

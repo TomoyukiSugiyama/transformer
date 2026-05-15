@@ -161,7 +161,7 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 #### 派生コーパス (Phase 7-1 / `src/bin/clean_aozora_corpus.rs`)
 
 ```bash
-# Phase 7-a 用 v2 コーパス (生成: cargo run --release --bin clean_aozora_corpus)
+# Phase 7-a 用 v2 コーパス (生成: cargo run --release --features corpus-tools --bin clean_aozora_corpus)
 # 旧 ===== 作家『タイトル』 ===== ヘッダを <BOS><AUTHOR=...><TITLE>...</TITLE> に変換、
 # 戯曲フォーマット 8 作品を <DRAMA>...</DRAMA> で囲む、 章番号行 1131 行を削除。
 # → corpus/aozora_meiji_taisho_v2.txt (504 作品、 ~8.28M char)
@@ -174,7 +174,7 @@ CharBPE は **Phase 6** で導入した新実装で、 日本語コーパスで�
 ```bash
 # [A] HuggingFace `wikimedia/wikipedia` (snapshot 20231101.ja) から
 #     parquet を Pure Rust で取得し text 列を抽出。 累計 1B char 到達で打ち切り。
-cargo run --release --bin fetch_wikipedia_ja
+cargo run --release --features corpus-tools --bin fetch_wikipedia_ja
 # → corpus/wikipedia_ja_raw.txt (~1.04B char / 370,523 記事、 2.5 GB)
 # → corpus/_wiki_tmp/  (parquet キャッシュ、 不要なら削除可)
 
