@@ -6,13 +6,13 @@ default-run = "transformer"
 
 [features]
 corpus-tools = ["parquet", "arrow-array", "arrow-schema", "reqwest"]
-gpu = ["candle-core", "candle-nn"]
+metal = ["candle-core", "candle-nn"]
 
 [dependencies]
 matrixmultiply = "0.3.10"
 rand = "0.10.1"
 rayon = "1.10"
-candle-core = { version="0.10.2",optional = true }
+candle-core = { version="0.10.2", features = ["metal"], optional = true }
 candle-nn = { version="0.10.2",optional = true }
 
 # Phase 8-1 corpus 準備用 (HuggingFace から Wikipedia 日本語版 parquet を取得・解凍)。
