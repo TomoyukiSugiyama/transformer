@@ -13,9 +13,9 @@ Phase 8 では以下の 3 軸を順に拡大する。
 |---|---:|---:|---:|
 | コーパス chars | 8.28 M | **~1 B** | 120x |
 | Tokenizer vocab | 8,009 | **32,000** | 4x |
-| モデル params | ~20 M | **~127 M** (d=768, L=8) | 2.5x |
+| モデル params | ~20 M | **~127 M** (d=768, L=8) | 6.35x |
 
-Phase 8-1 (コーパス) → 8-2 (tokenizer) → 8-3 (model) の順で着手。
+Phase 8-1 [A~C] (コーパス) → 8-1 [D] (tokenizer) → 8-1 [E] (model) の順で着手。
 
 ## サブフェーズ
 
@@ -191,14 +191,20 @@ const TARGET_CHARS: usize = 1_000_000_000;
 Phase 8-1 用の heavy deps を追加した:
 
 ```toml
-parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
-arrow-array = "53"
-arrow-schema = "53"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-```
+[features]
+corpus-tools = ["parquet", "arrow-array", "arrow-schema", "reqwest"]
 
-学習側 binary には影響しないが、 cargo build 時の transitive deps は増える。
-将来コーパス取得が完了した後、 ワークスペース分離を検討してもよい。
+[dependencies]
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"], optional = true }
+arrow-array = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+
+[[bin]]
+name = "fetch_wikipedia_ja"
+path = "src/bin/fetch_wikipedia_ja.rs"
+required-features = ["corpus-tools"]
+```
 
 ## ストレージ
 
