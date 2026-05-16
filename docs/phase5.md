@@ -19,7 +19,7 @@ Phase 5 では 4 軸を **コスト順** に検証する:
 | 5-3 | **コーパス拡大 (1M → 8.3M char)** | データ不足が奇妙な単語混入の主因 | スクリプト準備済 | x2 (時間 + データ) | ✅ 完了 (val_ppl 18.71、 vocab inflation で見かけ悪化、 BPC で改善) |
 | 5-4a | **モデル拡大 d_model 384 → 512** | 容量不足、 日本語の複雑さ | Config 準備済 | x1.5 | ✅ 完了 (val_ppl 18.16、 BPC 4.18 char 系最高) |
 | 5-4b | **モデル拡大 d_model 512, n_layers 6→8 (~26M)** | 深さでさらなる容量増 | Config 準備済 | x2 | ⛔ 未実行 → Phase 8-1 [E] (5-4c 相当) に直接ジャンプ |
-| **5-4c** | **モデル拡大 d_model 768, n_layers 8 (~50M)** | GPT-2 small 規模 | Config 準備済 | x4-8 | 🟡 **Phase 8-1 [E] として実装済 / 起動待ち** ([phase8.md](phase8.md)) |
+| **5-4c** | **モデル拡大 d_model 768, n_layers 8 (~127M)** | GPT-2 small 規模 | Config 準備済 | x4-8 | ✅  完了 **Phase 8-1 [E] として実装済** ([phase8.md](phase8.md)) |
 
 ### 順序の根拠
 
@@ -511,8 +511,8 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 | Phase 5-3 (5-4 baseline) | `aozora_meiji_taisho_max512` | 384 | 6 | 6 | 1536 | 32 | 10.7M | ✅ 完了 |
 | **5-4a 中規模** | `aozora_meiji_taisho_d512_max512` | 512 | 8 | 6 | 2048 | 32 | ~20M | ✅ 完了 (val_ppl 18.16, BPC 4.18) |
 | **5-4b 大規模** | `aozora_meiji_taisho_d512_n8_max512` | 512 | 8 | 8 | 2048 | 32 | ~26M | ⛔ 未実行 (Phase 6/7 で 5-4a 形状を保って改善継続) |
-| **5-4c 最大** | `aozora_meiji_taisho_d768_max512` | 768 | 12 | 8 | 3072 | 16 | ~50M | (元案、 Phase 8-1 [E] で実体化) |
-| **Phase 8-1 [E]** (5-4c の実体化) | `aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd` | **768** | **12** | **8** | **3072** | **16** | **~50M** | 🟡 config 実装済 / 起動待ち |
+| **5-4c 最大** | `aozora_meiji_taisho_d768_max512` | 768 | 12 | 8 | 3072 | 16 | ~127M | (元案、 Phase 8-1 [E] で実体化) |
+| **Phase 8-1 [E]** (5-4c の実体化) | `aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd` | **768** | **12** | **8** | **3072** | **16** | **~127M** | ✅ 完了 (val_ppl 36.60, BPC 3.13) |
 
 > Phase 8-1 [E] は元案の 5-4c から以下を変更している:
 > - corpus: `aozora_meiji_taisho.txt` (8.3M char) → `aozora_wikipedia_mixed.txt` (**983M char**, ~120x)
@@ -529,7 +529,7 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 | 5-4a | ~12s | 3000 | ~10 時間 (実測 7h 41min @ 9.37s/step) |
 | 5-4b | ~15s | 3000 | ~13 時間 (未実行) |
 | 5-4c | ~25s (batch=16 で軽減) | 3000 | ~21 時間 (未実行) |
-| **Phase 8-1 [E]** (5-4c の実体化) | **~17-20s** (max_len=1024 + Phase 7-5 高速化) | **10,000** | **~50 時間 (~2 日)** |
+| **Phase 8-1 [E]** (5-4c の実体化) | **~17s** (max_len=1024 + Phase 7-5 高速化) | **10,000** | ** 46.5 時間 (実測 46h 30min @ 16.7 s/step)** |
 
 > 5-4 は学習時間が長いため、 baseline (5-3) で best val_ppl が出た step 数 ± 20% に
 > end_step を絞ることを推奨 (Config 上は 3000 のまま、 実行中に早期停止)。
@@ -582,7 +582,7 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 | + Phase 6-d (CharBPE 8K, d=512, max_len=1024 + WSD + Phase 7-1/7-2) | — (token 単位差) | val_ppl 71.81、 **BPC 3.74 (-0.6% vs 6-a, full-corpus 基準)** ※ log の val 基準値は 4.22 | 長文一貫性向上、 戯曲混入は未解消 | +7h 41min |
 | + Phase 7-a (CharBPE 8K + clean v2 corpus + 作家・戯曲 special token) | — | val_ppl 77.04、 **BPC 4.291 (val 基準, Phase 6-d 4.22 比 +1.7%)** | 戯曲混入と作家ヘッダ生成の構造的解消、 作家別文体は再現 | +6h 44min |
 | + 5-4b (d_model 512, n_layers 8, ~26M params) | 15-16 | ⛔ 未実行 (Phase 6/7 で 5-4a 形状の改善継続を優先) | — | — |
-| + **Phase 8-1 [E]** (5-4c の実体化, d=768, n=8, ~50M params, **CharBPE 32K + Aozora+Wiki 983M char**) | BPC 3.5-3.8 (Phase 7-a 4.29 比 -15〜-17%) | 🟡 config 実装済 / 起動待ち | Wikipedia 由来の知識・人名・カタカナ概念の取込、 文学的文体の維持 | +50 時間 (累積 ~75 時間) |
+| + **Phase 8-1 [E]** (5-4c の実体化, d=768, n=8, ~50M params, **CharBPE 32K + Aozora+Wiki 983M char**) | BPC 3.5-3.8 (Phase 7-a 4.29 比 -15〜-17%) | val_ppl 36.60 BPC 3.13 ✅ **期待を大幅更新(PBC 基準,Phase 7-a 4.29比 -27%)** | Wikipedia 由来の知識・人名・カタカナ概念の取込、 文学的文体の維持 | +46h 30min |
 
 > **5-3 が想定外悪化したことを踏まえ、 5-4 系の期待値も上方修正 (=val_ppl の絶対値を高めに)** している。
 > ベースライン (5-3 の 18.71) からの **改善率** で評価する方が妥当。 各サブフェーズの結果次第で計画を再調整。

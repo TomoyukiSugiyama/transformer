@@ -94,31 +94,44 @@ loss が下がり続けても汎化品質は途中から劣化する典型例。
 ## ログの読み方
 
 ```
-# run_name=phase2_d256_ff1024_max128_with_accelerate
-# d_model=256, n_heads=8, d_ff=1024, n_layers=4, max_len=128, vocab_size=4000
-# lr_max=0.0003, lr_min=0.00001, warmup_steps=200, end_step=10000, ...
-# corpus_tokens=331204, chunk_len=128, max_offset=331076
-step,loss,ema,min,max,lr,ms_per_step,elapsed_s
-20,7.922065,8.275023,7.922065,8.424044,3.000e-5,661.3,13.2
-40,7.347139,7.785185,7.228264,7.922489,6.000e-5,655.5,26.3
+# run_name=phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd
+# tokenizer=CharBpe, d_model=768, n_heads=12, d_ff=3072, n_layers=8, max_len=1024, vocab_size=32010, dropout=0.2, wd=0.1, beta2=0.99
+# lr_max=0.0005, lr_min=0.00005, warmup_steps=500, end_step=10000, lr_schedule=WarmupStableDecay { stable_steps: 8000 }, batch_size=16, log_every=50, save_every=500, start_step=1
+# corpus_tokens=561559645, chunk_len=1024, max_offset=561558621, val_enabled=true, val_tokens=29652500, val_chars=49150388, val_chars_per_token=1.6575, val_every=500, val_n_batches=16
+step,loss,ema,min,max,ppl,ema_ppl,lr,ms_per_step,elapsed_s
+50,8.640802,9.396451,8.557181,10.550390,5657.8677,12045.5547,5.000e-5,16618.3,830.9
+100,7.438551,7.876787,7.372478,8.610026,1700.2854,2635.3918,1.000e-4,16838.3,1672.8
 ...
 ```
 
-| 列 | 意味 |
-|----|------|
-| `step` | 現在の学習ステップ |
-| `loss` | 当該ステップでのバッチ平均 loss |
-| `ema` | 指数移動平均 loss (α=0.05) |
-| `min` / `max` | 直近 `log_every` ステップ内の最小 / 最大 loss |
-| `lr` | 当該ステップでの学習率 |
-| `ms_per_step` | 直近 `log_every` ステップでの 1 ステップあたり平均所要時間 (ミリ秒) |
-| `elapsed_s` | 学習開始からの累積経過時間 (秒) |
+| 列           | 意味                                       |
+| ----------- | ---------------------------------------- |
+| step        | 現在の学習ステップ                                |
+| loss        | 当該ステップでのバッチ平均 cross-entropy loss         |
+| ema         | 指数移動平均 loss（α=0.05）                      |
+| min / max   | 直近 log_every ステップ内の最小 / 最大 loss          |
+| ppl         | 当該ステップの perplexity（exp(loss)）            |
+| ema_ppl     | EMA loss の perplexity（exp(ema)）          |
+| lr          | 当該ステップでの学習率                              |
+| ms_per_step | 直近 log_every ステップでの 1 ステップあたり平均所要時間（ミリ秒） |
+| elapsed_s   | 学習開始（または resume 起点）からの累積経過時間（秒）          |
 
-`val_every` 間隔でコメント行として val 結果が挿入される (Phase 3 以降):
+val_every 間隔でコメント行として val 結果が挿入される:
 
 ```
-# val step=500 val_loss=1.5400 val_ppl=4.6646
+# val step=500 val_loss=5.758825 val_ppl=316.9756 bpc=5.0124
+# best updated: step=500 val_loss=5.758825 val_ppl=316.9756 bpc=5.0124 (prev val_loss=(none)) -> saved checkpoints/.../best.bin
+saved: checkpoints/.../step_000500.bin
 ```
 
-`val_loss` は 90/10 split の validation 側からランダムに `val_n_batches` 個の窓を取って
-計測した平均 cross-entropy loss。 dropout は自動的に無効化される。
+| フィールド                  | 意味                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| val_loss               | validation 側からランダムに val_n_batches（=16）個の窓を取って計測した平均 cross-entropy loss。dropout は自動的に無効化 |
+| val_ppl                | exp(val_loss)                                                                           |
+| bpc                    | bits-per-character（val_loss / log(2) / val_chars_per_token）。文字レベルの圧縮率指標                 |
+| best updated           | val_loss が過去最小を更新したときのみ出力。best.bin へ上書き保存                                               |
+| saved: step_XXXXXX.bin | save_every（=500）ごとに定期保存されるチェックポイント                                                      |
+
+resume 時の注意: start_step が 1 以外の場合、elapsed_s はその resume セッションの起点からの相対値になる。複数セッションを跨いだ総学習時間は各セッション末尾の elapsed_s を合算する必要がある。
+
+

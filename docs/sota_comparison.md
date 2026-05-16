@@ -46,7 +46,7 @@
 [`roadmap.md`](roadmap.md) と整合的に並べた優先度:
 
 1. ~~**KV cache**~~ ✅ 実装済 → [`kv_cache.md`](kv_cache.md)
-2. **FlashAttention (Rust + Accelerate 流)** — 長 seq 対応のためのメモリ最適化。 IO-aware なら CPU でも効果あり
+2. ~~**FlashAttention (Rust + Accelerate 流)**~~ — 長 seq 対応のためのメモリ最適化。 IO-aware なら CPU でも効果あり ✅ 実装済 → [`performance.md`](performance.md)
 3. **GQA / MQA** — KV cache と組合せて KV メモリを `1/n_heads` に削減
 4. **KV cache truncation (sliding window)** — `max_len` 超過時の継続生成
 5. **YaRN / ABF (RoPE 拡張)** — 学習時 `max_len=512` を超える長さへの外挿能力
@@ -64,7 +64,7 @@
 |---------|------|
 | **モダン LLM の中核要素 (Norm / FFN / RoPE / Pre-Norm)** | ✅ SoTA と整合的に実装済 |
 | **学習の安定化 (AdamW + Gradient Clip + Cosine LR)** | ✅ 標準的な手法は揃っている |
-| **推論最適化 (KV cache / FlashAttention / 量子化)** | 🟡 KV cache 実装済、 FlashAttention・量子化は future work |
+| **推論最適化 (KV cache / FlashAttention / 量子化)** | 🟡 KV cache・FlashAttention実装済、量子化は future work |
 | **スケール (params / data / compute)** | ❌ 3 桁の差 — 学習用 OSS としては適切 |
 | **エコシステム (SafeTensors / HF)** | ❌ 未対応 — 簡易 loader を今後検討 |
 | **教育的価値 (Pure Rust / 1 ファイル単位の追跡性)** | ⭐⭐⭐ **本実装の差別化価値** |
