@@ -13,7 +13,7 @@ Phase 8 では以下の 3 軸を順に拡大する。
 |---|---:|---:|---:|
 | コーパス chars | 8.28 M | **~1 B** | 120x |
 | Tokenizer vocab | 8,009 | **32,000** | 4x |
-| モデル params | ~20 M | **~127 M** (d=768, L=8) | 6.35x |
+| モデル params | ~20 M | **~124.7M** (d=768, L=8) | 6.35x |
 
 Phase 8-1 [A~C] (コーパス) → 8-1 [D] (tokenizer) → 8-1 [E] (model) の順で着手。
 
@@ -94,7 +94,7 @@ Phase 8-1 [A~C] (コーパス) → 8-1 [D] (tokenizer) → 8-1 [E] (model) の�
 - **config method**: `Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` (`src/main.rs`)
 - **run_name**: `phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd`
 - **パラメタ**:
-  - shape: d=768, n_heads=12, n_layers=8, d_ff=3072, max_len=1024 → ~127M params (Phase 5-4c 予約スケール)
+  - shape: d=768, n_heads=12, n_layers=8, d_ff=3072, max_len=1024 → ~124.7M params (Phase 5-4c 予約スケール)
   - vocab=32,010 (cfg側、 実 tokenizer 32,009)
   - batch_size=16
   - lr_max=5e-4, lr_min=5e-5, warmup_steps=500 (Phase 7-a の 7e-4 から GPT-2 small 慣例に合わせ控えめに)

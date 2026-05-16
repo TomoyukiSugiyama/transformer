@@ -119,7 +119,7 @@ Phase 7-a までの 20M params × 5M token は Chinchilla 比 **80x 不足**で�
 |---|---:|---:|---:|
 | コーパス chars | 8.28 M | ~1 B | 120x |
 | Tokenizer vocab | 8,009 | 32,000 | 4x |
-| モデル params | ~20 M | ~127 M (d=768, L=8) | 6.35x |
+| モデル params | ~20 M | ~124.7M (d=768, L=8) | 6.35x |
 
 | 項目 | 内容 | 状態 |
 |------|------|------|
@@ -127,7 +127,7 @@ Phase 7-a までの 20M params × 5M token は Chinchilla 比 **80x 不足**で�
 | **P8-1 [B]** Wikipedia クレンジング | `src/bin/clean_wikipedia_corpus.rs` で trailing reference section 切り捨て + 短記事破棄 → `corpus/wikipedia_ja.txt` (974.7M char / 345,958 記事、 93.4% 保持) | ✅ 完了 |
 | **P8-1 [C]** 混合コーパス作成 | `src/bin/mix_corpus.rs` で Aozora v2 (8M char, 0.84%) + Wikipedia (974M char, 99.16%) → `corpus/aozora_wikipedia_mixed.txt` (**983M char**, 2.4 GB) | ✅ 完了 |
 | **P8-1 [D]** CharBPE vocab 8K → 32K 再訓練 | `src/bin/train_tokenizer_phase8.rs` 実行 (110.8 min)、 stratified sample (Aozora 500K + Wiki 1.5M chars) で merge 学習、 全 char カバレッジは混合コーパス全体。 出力 `tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin` (実 vocab=32,009、 `</TITLE>` が BPE merge と衝突)。 chars/token: Aozora **1.795** (Phase 7-a 1.46 から +23%) / Wikipedia **1.873** | ✅ 完了 |
-| P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` 実装済 (`src/main.rs`)。 d=768, n_heads=12, n_layers=8, d_ff=3072, vocab=32K, ~127M params、 batch 16 / max_len 1024、 lr_max 5e-4 + WSD (warmup 500 + stable 8000 + decay 1500 = end_step 10,000)、 log/save/val 50/500/500。 per-step ~17-20 s 想定、 完走 ~50 h ≈ 2 日。 BPC: Phase 7-a 4.29 → **3.5-3.8** (-15〜-17%) 期待。 期待を大幅に上回り、**BPC 3.13 (val)** を達成 | ✅ 完了 |
+| P8-1 [E] config 追加 + 学習起動 | `Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` 実装済 (`src/main.rs`)。 d=768, n_heads=12, n_layers=8, d_ff=3072, vocab=32K, ~124.7M params、 batch 16 / max_len 1024、 lr_max 5e-4 + WSD (warmup 500 + stable 8000 + decay 1500 = end_step 10,000)、 log/save/val 50/500/500。 per-step ~17-20 s 想定、 完走 ~50 h ≈ 2 日。 BPC: Phase 7-a 4.29 → **3.5-3.8** (-15〜-17%) 期待。 期待を大幅に上回り、**BPC 3.13 (val)** を達成 | ✅ 完了 |
 
 詳細は [`docs/phase8.md`](phase8.md) を参照。
 
