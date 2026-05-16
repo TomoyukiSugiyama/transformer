@@ -10,10 +10,10 @@
 
 | 項目 | 効果 | 影響範囲 | 状態 |
 |------|------|---------|------|
-| **RMSNorm** | val_ppl -1.1% (18.98 → 18.77) / 過学習開始を 100 step 後ろ倒し / 速度差は出ず | `layer_normalization` を差し替え | ✅ 完了 ([Phase D-1](phase_d.md#phase-d-1-rmsnorm-vs-layernorm)) |
-| **SwiGLU FFN** | val_ppl -0.4% (18.77 → 18.70) + ms/step **-35%** + best 到達 200 step 早期化 | `feed_forward_network` を差し替え | ✅ 完了 ([Phase D-3](phase_d.md#phase-d-3-swiglu-ffn)) |
-| **RoPE** | floor 不変 (+0.7%) / early step **-10〜22%** の収束加速 / ms/step +4% | `MultiHeadAttention` 内に組込、 `pe` を Option 化 | ✅ 完了 ([Phase D-2](phase_d.md#phase-d-2-rope)) |
-| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | 見送り (KV cache 未実装のため効果検証困難) |
+| **RMSNorm** | val_ppl -1.1% (18.98 → 18.77) / 過学習開始を 100 step 後ろ倒し / 速度差は出ず | `layer_normalization` を差し替え | ✅ 完了 ([Phase D-1](phase_d.md)) |
+| **SwiGLU FFN** | val_ppl -0.4% (18.77 → 18.70) + ms/step **-35%** + best 到達 200 step 早期化 | `feed_forward_network` を差し替え | ✅ 完了 ([Phase D-3](phase_d.md)) |
+| **RoPE** | floor 不変 (+0.7%) / early step **-10〜22%** の収束加速 / ms/step +4% | `MultiHeadAttention` 内に組込、 `pe` を Option 化 | ✅ 完了 ([Phase D-2](phase_d.md)) |
+| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | 実施中 ([Phase D-4](phase_d.md)) |
 
 **累積効果**: LN+GELU baseline → RMS+SwiGLU+RoPE で **val_ppl -1.5% / best 到達時間 -41%**。
 詳細結果は [docs/phase_d.md](phase_d.md) を参照。
@@ -140,26 +140,26 @@ Phase 5-4a (d=512, n_layers=6, batch=32) の現状: per-step ~9.4s、 実効 150
 - **Apple GPU (Metal/MPS) 移植** — Pure Rust の精神を壊す
 - **CUDA/ROCm 移植** — 巨大な追加コスト
 
+これらは別のプロジェクトとする。
+
 ### Tier 2 (1.5-3x, 推奨): エンジニアリング改善
 
-| 案 | 効果 | 工数 | 説明 |
-|----|------|------|------|
-| **`Vec<Vec<f32>>` → `Matrix` 全面置換** | 1.3-1.7x | 中 (1 日) | KV cache で見えた alloc コストが学習にも効いている。 norm/ffn/dropout/embedding/loss を `Matrix` に統一 |
-| **batch_size 拡大 (32→64)** + LR 比例 | 1.2-1.5x | 小 | AMX タイル利用効率向上 |
-| **WSD (Warmup-Stable-Decay) スケジューラ** | 同 val_ppl を 15-30% 早く到達 | 小 | MiniCPM/DeepSeek 慣例 |
-| **Flash Attention 風融合 (softmax + matmul)** | 1.3-2x (attn 部分のみ) | 中-大 | CPU でも IO 削減で効く |
-| **Grad accumulation (effective batch 256-512)** | 収束 step 削減の可能性 | 小 | LLaMA / GPT-3 慣例 |
+| 案 | 効果 | 工数 | 説明 | 状態 |
+|----|------|------|------|----|
+| **`Vec<Vec<f32>>` → `Matrix` 全面置換** | 1.3-1.7x | 中 (1 日) | KV cache で見えた alloc コストが学習にも効いている。 norm/ffn/dropout/embedding/loss を `Matrix` に統一 | ✅ 完了 [`performance.md`](performance.md) |
+| **batch_size 拡大 (32→64)** + LR 比例 | 1.2-1.5x | 小 | AMX タイル利用効率向上 | 未実施 |
+| **WSD (Warmup-Stable-Decay) スケジューラ** | 同 val_ppl を 15-30% 早く到達 | 小 | MiniCPM/DeepSeek 慣例 | ✅ 完了[`Phase 6-d`](phase6.md) |
+| **Flash Attention 風融合 (softmax + matmul)** | 1.3-2x (attn 部分のみ) | 中-大 | CPU でも IO 削減で効く | ✅ 完了 [`performance.md`](performance.md) |
+| **Grad accumulation (effective batch 256-512)** | 収束 step 削減の可能性 | 小 | LLaMA / GPT-3 慣例 | 未実施 |
 
 ### Tier 3 (1.8-2.5x): mixed precision
-- **bf16 / f16** (Apple BNNS 経由) — Matrix の dtype 抽象化が必要、 数値安定性試験要
+- **bf16 / f16** (Apple BNNS 経由) — Matrix の dtype 抽象化が必要、 数値安定性試験要 -> 未実施
+
+実装コストに見合わないため、別のプロジェクトとする。
 
 ### Tier 4: 「収束 step 数を減らす」 アプローチ
-- BPE トークナイザに切替 (vocab 8K-16K で token 数 1/2-1/3) — step 数比例で削減
-- z-loss / aux loss、 カリキュラム学習、 SP/μP init
-
-### 着手判断
-- 現在の Phase 5-4a 完了 (~3.7h) を **見守る** 方針 (実行中の変更はリスクが高い)
-- Phase 5-4b/c で **per-step が 1.5-2 倍** になり、 トータル学習時間が 13-21h になるのが現実化したら、 その時点で Tier 2 (Matrix 統一 + batch 拡大) を検討
+- BPE トークナイザに切替 (vocab 8K-16K で token 数 1/2-1/3) — step 数比例で削減 -> ✅ 完了[`Phase 6-d`](phase6.md)
+- z-loss / aux loss、 カリキュラム学習、 SP/μP init -> 未実施
 
 ## 推論時のキャッシュ機構 (KV cache) ✅ 完了 (4.71x speedup @ d=512)
 
@@ -196,10 +196,10 @@ Phase 5-4a (d=512, n_layers=6, batch=32) の現状: per-step ~9.4s、 実効 150
 
 ## 生成制御の追加
 - ~~top-p (nucleus) sampling~~ → [Phase 5-1](phase5.md#phase-5-1-top-p-nucleus-sampling) で実装完了
-- 最小生成 token 数 (`min_new_tokens`)
-- bad words / banned ngrams フィルタ
+- 最小生成 token 数 (`min_new_tokens`) -> 未実施
+- bad words / banned ngrams フィルタ -> 未実施
 
 ## `layer_normalization`, `embedding` 等の Matrix 統一
 これらは現在 `Vec<Vec<f32>>` をやりとりしており、 内部の API 境界で `Matrix::from_jagged`/
 `to_jagged` 変換が走っている。 すべて `Matrix` で統一すれば変換コストが消える。
-ただし計算ボトルネックではないので優先度は低い。
+ただし計算ボトルネックではないので優先度は低い。 -> ✅ 完了 [`performance.md`](performance.md)

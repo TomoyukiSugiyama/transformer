@@ -26,6 +26,7 @@ impl Transformer {
         n_layers: usize,
         d_model: usize,
         n_heads: usize,
+        n_kv_heads: usize,
         d_ff: usize,
         max_len: usize,
         dropout_p: f32,
@@ -47,6 +48,7 @@ impl Transformer {
                     TransformerBlock::new(
                         d_model,
                         n_heads,
+                        n_kv_heads,
                         d_ff,
                         dropout_p,
                         normalization_kind,

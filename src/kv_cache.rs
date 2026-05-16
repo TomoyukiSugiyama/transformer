@@ -4,7 +4,7 @@
 //! `O(n²·d) → O(n·d)` に削減する。
 //!
 //! # 格納するもの
-//! - `k`: **RoPE 適用後** の K (shape `(cur_len, d_model)`)
+//! - `k`: **RoPE 適用後** の K (shape `(cur_len, d_kv_model)`)
 //!   - RoPE は位置に依存する回転なので、 K_pos が一度回転されたら以降そのまま再利用できる
 //! - `v`: **未回転** の V (V には RoPE を掛けないため)
 //! - `cur_len`: これまでに何 token 分キャッシュされたか
@@ -22,26 +22,26 @@ use crate::matrix::Matrix;
 
 /// 単一 attention 層のための K/V キャッシュ。
 pub struct KvCache {
-    /// RoPE 適用後の K。 shape `(cur_len, d_model)`。
+    /// RoPE 適用後の K。 shape `(cur_len, d_kv_model)`。
     /// Sinusoidal PE の場合は projection 後そのまま (回転は適用されない)。
     k: Matrix,
-    /// 未回転の V。 shape `(cur_len, d_model)`。
+    /// 未回転の V。 shape `(cur_len, d_kv_model)`。
     v: Matrix,
     cur_len: usize,
     capacity: usize,
-    d_model: usize,
+    d_kv_model: usize,
 }
 
 impl KvCache {
     /// `capacity`: 保持できる最大 token 数 (= max_len)
-    /// `d_model`: モデル次元 (全 head 連結後の次元)
-    pub fn new(capacity: usize, d_model: usize) -> Self {
+    /// `d_kv_model`: モデル次元 (全 head 連結後の次元)
+    pub fn new(capacity: usize, d_kv_model: usize) -> Self {
         Self {
-            k: Matrix::zeros(0, d_model),
-            v: Matrix::zeros(0, d_model),
+            k: Matrix::zeros(0, d_kv_model),
+            v: Matrix::zeros(0, d_kv_model),
             cur_len: 0,
             capacity,
-            d_model,
+            d_kv_model,
         }
     }
 
@@ -55,16 +55,16 @@ impl KvCache {
     }
 
     #[allow(dead_code)]
-    pub fn d_model(&self) -> usize {
-        self.d_model
+    pub fn d_kv_model(&self) -> usize {
+        self.d_kv_model
     }
 
-    /// 現在格納されている K (shape `(cur_len, d_model)`) への参照。
+    /// 現在格納されている K (shape `(cur_len, d_kv_model)`) への参照。
     pub fn k(&self) -> &Matrix {
         &self.k
     }
 
-    /// 現在格納されている V (shape `(cur_len, d_model)`) への参照。
+    /// 現在格納されている V (shape `(cur_len, d_kv_model)`) への参照。
     pub fn v(&self) -> &Matrix {
         &self.v
     }
@@ -83,32 +83,32 @@ impl KvCache {
         );
         assert_eq!(
             k_row.len(),
-            self.d_model,
-            "KvCache append: k_row.len {} != d_model {}",
+            self.d_kv_model,
+            "KvCache append: k_row.len {} != d_kv_model {}",
             k_row.len(),
-            self.d_model
+            self.d_kv_model
         );
         assert_eq!(
             v_row.len(),
-            self.d_model,
-            "KvCache append: v_row.len {} != d_model {}",
+            self.d_kv_model,
+            "KvCache append: v_row.len {} != d_kv_model {}",
             v_row.len(),
-            self.d_model
+            self.d_kv_model
         );
 
         let new_len = self.cur_len + 1;
         // 旧データ + 新行を連結した新しい flat data を作って Matrix に詰める。
-        // 1 step あたり O(cur_len * d_model) の copy だが、 attention の O(cur_len * d_model²)
+        // 1 step あたり O(cur_len * d_kv_model) の copy だが、 attention の O(cur_len * d_kv_model²)
         // に比べれば微小。 累計でも O(n² · d) で旧 forward と同じオーダー。
-        let mut new_k = Vec::with_capacity(new_len * self.d_model);
+        let mut new_k = Vec::with_capacity(new_len * self.d_kv_model);
         new_k.extend_from_slice(self.k.data());
         new_k.extend_from_slice(k_row);
-        self.k = Matrix::from_flat(new_k, new_len, self.d_model);
+        self.k = Matrix::from_flat(new_k, new_len, self.d_kv_model);
 
-        let mut new_v = Vec::with_capacity(new_len * self.d_model);
+        let mut new_v = Vec::with_capacity(new_len * self.d_kv_model);
         new_v.extend_from_slice(self.v.data());
         new_v.extend_from_slice(v_row);
-        self.v = Matrix::from_flat(new_v, new_len, self.d_model);
+        self.v = Matrix::from_flat(new_v, new_len, self.d_kv_model);
 
         self.cur_len = new_len;
     }
@@ -116,8 +116,8 @@ impl KvCache {
     /// 全ての履歴を破棄して空に戻す。 別プロンプトでの再利用に。
     #[allow(dead_code)]
     pub fn reset(&mut self) {
-        self.k = Matrix::zeros(0, self.d_model);
-        self.v = Matrix::zeros(0, self.d_model);
+        self.k = Matrix::zeros(0, self.d_kv_model);
+        self.v = Matrix::zeros(0, self.d_kv_model);
         self.cur_len = 0;
     }
 }
@@ -131,7 +131,7 @@ mod tests {
         let c = KvCache::new(16, 8);
         assert_eq!(c.cur_len(), 0);
         assert_eq!(c.capacity(), 16);
-        assert_eq!(c.d_model(), 8);
+        assert_eq!(c.d_kv_model(), 8);
         assert_eq!(c.k().shape(), (0, 8));
         assert_eq!(c.v().shape(), (0, 8));
     }

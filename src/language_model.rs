@@ -27,6 +27,7 @@ pub struct LanguageModel {
     // ハイパーパラメータ
     d_model: usize,
     n_heads: usize,
+    n_kv_heads: usize,
     d_ff: usize,
     n_layers: usize,
     max_len: usize,
@@ -47,6 +48,7 @@ impl LanguageModel {
         vocab_size: usize,
         d_model: usize,
         n_heads: usize,
+        n_kv_heads: usize,
         d_ff: usize,
         n_layers: usize,
         max_len: usize,
@@ -60,6 +62,7 @@ impl LanguageModel {
             positional_encoding_kind,
             d_model,
             n_heads,
+            n_kv_heads,
             d_ff,
             n_layers,
             max_len,
@@ -77,6 +80,7 @@ impl LanguageModel {
         positional_encoding_kind: PositionalEncodingKind,
         d_model: usize,
         n_heads: usize,
+        n_kv_heads: usize,
         d_ff: usize,
         n_layers: usize,
         max_len: usize,
@@ -96,6 +100,7 @@ impl LanguageModel {
                 n_layers,
                 d_model,
                 n_heads,
+                n_kv_heads,
                 d_ff,
                 max_len,
                 dropout_p,
@@ -106,6 +111,7 @@ impl LanguageModel {
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
             n_heads,
+            n_kv_heads,
             d_ff,
             n_layers,
             max_len,
@@ -221,8 +227,7 @@ impl LanguageModel {
             .map(|&t| if t == pad_id { 0 } else { 1 })
             .collect();
 
-        let (loss, dl_dlogits) =
-            CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
+        let (loss, dl_dlogits) = CrossEntropyLoss::forward_sequence(&logits, targets, &mask_ce);
         let dl_dh_shifted = self.output_head.backward(&dl_dlogits);
         let dl_dh_full = pad_grad_matrix(&dl_dh_shifted, seq);
         let dl_dh_full = clip_grad_norm_matrix(dl_dh_full, 1.0);
@@ -470,6 +475,7 @@ impl LanguageModel {
         let mut map = WeightMap::new();
         map.insert_scalar("meta.d_model", self.d_model as u64);
         map.insert_scalar("meta.n_heads", self.n_heads as u64);
+        map.insert_scalar("meta.n_kv_heads", self.n_kv_heads as u64);
         map.insert_scalar("meta.d_ff", self.d_ff as u64);
         map.insert_scalar("meta.n_layers", self.n_layers as u64);
         map.insert_scalar("meta.max_len", self.max_len as u64);
@@ -501,6 +507,7 @@ impl LanguageModel {
     fn restore_model(map: &WeightMap) -> Result<Self> {
         let d_model = map.get_scalar("meta.d_model")? as usize;
         let n_heads = map.get_scalar("meta.n_heads")? as usize;
+        let n_kv_heads = map.get_scalar("meta.n_kv_heads")? as usize;
         let d_ff = map.get_scalar("meta.d_ff")? as usize;
         let n_layers = map.get_scalar("meta.n_layers")? as usize;
         let max_len = map.get_scalar("meta.max_len")? as usize;
@@ -538,6 +545,7 @@ impl LanguageModel {
                 n_layers,
                 d_model,
                 n_heads,
+                n_kv_heads,
                 d_ff,
                 max_len,
                 dropout_p,
@@ -548,6 +556,7 @@ impl LanguageModel {
             output_head: OutputHead::new(d_model, vocab_size),
             d_model,
             n_heads,
+            n_kv_heads,
             d_ff,
             n_layers,
             max_len,
@@ -658,13 +667,14 @@ mod kv_cache_tests {
             norm,
             ff,
             pe,
-            0,    // vocab_size = 0 → tokenizer から自動算出 (Char)
-            32,   // d_model
-            4,    // n_heads (d_head=8 は偶数なので RoPE OK)
-            64,   // d_ff
-            2,    // n_layers
-            32,   // max_len
-            0.0,  // dropout (eval モードなら効かないが念のため 0)
+            0,   // vocab_size = 0 → tokenizer から自動算出 (Char)
+            32,  // d_model
+            4,   // n_heads (d_head=8 は偶数なので RoPE OK)
+            4,   // n_kv_heads (d_head=8 は偶数なので RoPE OK)
+            64,  // d_ff
+            2,   // n_layers
+            32,  // max_len
+            0.0, // dropout (eval モードなら効かないが念のため 0)
         )
     }
 
@@ -725,7 +735,9 @@ mod kv_cache_tests {
         );
         model.set_training(false);
         let ids = model.tokenizer.encode_prompt("hello world");
-        let mut caches = model.transformer.init_kv_caches(model.max_len, model.d_model);
+        let mut caches = model
+            .transformer
+            .init_kv_caches(model.max_len, model.d_model);
 
         // ids の各 prefix の最終位置 logits を 2 通りで計算
         for end in 1..=ids.len() {
@@ -751,7 +763,11 @@ mod kv_cache_tests {
                 assert!(
                     diff < 1e-3,
                     "logit mismatch at position {} vocab {}: no_cache={}, with_cache={}, diff={}",
-                    end, i, a, b, diff,
+                    end,
+                    i,
+                    a,
+                    b,
+                    diff,
                 );
             }
         }
@@ -759,7 +775,7 @@ mod kv_cache_tests {
 }
 
 /// Phase 7 高速化の効果を見るベンチマーク。 Phase 6-c と同じモデル形状
-/// (d_model=512, n_heads=8, n_layers=6, d_ff=2048, max_len=1024) で
+/// (d_model=512, n_heads=8, n_kv_heads=8, n_layers=6, d_ff=2048, max_len=1024) で
 /// `forward_backward + apply_gradients` を数 step 実行し、 1 step あたりの
 /// 平均所要時間を出力する。 比較対象は Phase 6-c の実測値 (~11,000 ms/step @ batch=16)。
 ///
@@ -793,6 +809,7 @@ mod bench_tests {
             0,    // vocab_size 自動
             512,  // d_model
             8,    // n_heads
+            8,    // n_kv_heads
             2048, // d_ff
             6,    // n_layers
             1024, // max_len
@@ -847,7 +864,9 @@ mod bench_tests {
         let per_step_ms = elapsed.as_secs_f64() * 1000.0 / measure_steps as f64;
 
         println!("=== Phase 7 step time benchmark ===");
-        println!("  shape: d_model=512, n_heads=8, n_layers=6, d_ff=2048, max_len=1024");
+        println!(
+            "  shape: d_model=512, n_heads=8, n_kv_heads=8, n_layers=6, d_ff=2048, max_len=1024"
+        );
         println!("  batch_size={batch_size}, measure_steps={measure_steps}");
         println!("  per-step (Matrix-direct path): {per_step_ms:.1} ms");
         // Phase 6-c 実測 ~11000 ms/step @ batch=16
@@ -855,7 +874,9 @@ mod bench_tests {
         let phase6c_per_step_batch16_ms = 11000.0;
         let baseline_per_step_ms = phase6c_per_step_batch16_ms * (batch_size as f64) / 16.0;
         let speedup = baseline_per_step_ms / per_step_ms;
-        println!("  Phase 6-c (old) per-step @ batch={batch_size}: ~{baseline_per_step_ms:.0} ms (推定)");
+        println!(
+            "  Phase 6-c (old) per-step @ batch={batch_size}: ~{baseline_per_step_ms:.0} ms (推定)"
+        );
         println!("  speedup vs Phase 6-c (推定): {speedup:.2}x");
         // Phase 7-2 (transpose 残存) の bench で観測された値: ~1500 ms
         let phase72_per_step_ms = 1500.0;
@@ -867,5 +888,135 @@ mod bench_tests {
         let phase74_speedup = phase73_per_step_ms / per_step_ms;
         println!("  Phase 7-3 (matmul_t1/t2) per-step (実測): ~{phase73_per_step_ms:.0} ms");
         println!("  speedup vs Phase 7-3 (Phase 7-4 fused matmul-add 効果): {phase74_speedup:.2}x");
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_phase8_step_time() {
+        // Phase 8a と完全に同じ形状を作る (重みはランダム初期化だが計算量は同じ)。
+        // tokenizer は Char で代用 (vocab=64 程度。 OutputHead/Embedding が小さくなるので
+        // 実際の Phase 8a (vocab=32K) より out-head の matmul が軽くなる点だけ留意)。
+        let corpus = "abcdefghijklmnopqrstuvwxyz0123456789 .,!?\nABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut phase8a_model = LanguageModel::new(
+            corpus,
+            TokenizerKind::Char,
+            NormalizationKind::Rms,
+            FeedForwardKind::SwiGlu,
+            PositionalEncodingKind::Rope,
+            0,    // vocab_size 自動
+            768,  // d_model
+            12,   // n_heads
+            12,   // n_kv_heads
+            3072, // d_ff
+            8,    // n_layers
+            1024, // max_len
+            0.2,  // dropout
+        );
+        phase8a_model.set_training(true);
+
+        let pad_id = phase8a_model.pad_id();
+        let mut opt = AdamW::new_with_wd(5e-4, 0.1);
+
+        // forward_backward / apply_gradients は 1 サンプルずつ呼ぶ実装が前提。
+        let batch_size = 2;
+        let seq_len = 1024;
+        let warmup_steps = 1;
+        let measure_steps = 5;
+
+        // 適当な token id 列 (vocab を超えないようランダム)
+        let vocab_size = 64; // Char tokenizer の概算 (実際の vocab はそれ未満)
+        let make_batch = |seed: usize| -> Vec<Vec<usize>> {
+            (0..batch_size)
+                .map(|b| {
+                    (0..seq_len)
+                        .map(|i| (seed + b * 31 + i * 7) % vocab_size.min(20))
+                        .collect()
+                })
+                .collect()
+        };
+
+        // warmup
+        for s in 0..warmup_steps {
+            let batch = make_batch(s + 100);
+            for sample in &batch {
+                let _ = phase8a_model.forward_backward(sample, pad_id);
+            }
+            phase8a_model.apply_gradients(&mut opt);
+            phase8a_model.zero_grad();
+        }
+
+        // 計測
+        let start = Instant::now();
+        for s in 0..measure_steps {
+            let batch = make_batch(s);
+            for sample in &batch {
+                let _ = phase8a_model.forward_backward(sample, pad_id);
+            }
+            phase8a_model.apply_gradients(&mut opt);
+            phase8a_model.zero_grad();
+        }
+        let phase8a_elapsed = start.elapsed();
+        let phase8a_per_step_ms = phase8a_elapsed.as_secs_f64() * 1000.0 / measure_steps as f64;
+
+        let mut phase8b_model = LanguageModel::new(
+            corpus,
+            TokenizerKind::Char,
+            NormalizationKind::Rms,
+            FeedForwardKind::SwiGlu,
+            PositionalEncodingKind::Rope,
+            0,    // vocab_size 自動
+            768,  // d_model
+            12,   // n_heads
+            4,    // n_kv_heads
+            3072, // d_ff
+            8,    // n_layers
+            1024, // max_len
+            0.2,  // dropout
+        );
+        phase8b_model.set_training(true);
+
+        let pad_id = phase8b_model.pad_id();
+        let mut opt = AdamW::new_with_wd(5e-4, 0.1);
+
+        // warmup
+        for s in 0..warmup_steps {
+            let batch = make_batch(s + 100);
+            for sample in &batch {
+                let _ = phase8b_model.forward_backward(sample, pad_id);
+            }
+            phase8b_model.apply_gradients(&mut opt);
+            phase8b_model.zero_grad();
+        }
+
+        // 計測
+        let start = Instant::now();
+        for s in 0..measure_steps {
+            let batch = make_batch(s);
+            for sample in &batch {
+                let _ = phase8b_model.forward_backward(sample, pad_id);
+            }
+            phase8b_model.apply_gradients(&mut opt);
+            phase8b_model.zero_grad();
+        }
+        let phase8b_elapsed = start.elapsed();
+        let phase8b_per_step_ms = phase8b_elapsed.as_secs_f64() * 1000.0 / measure_steps as f64;
+
+        println!("=== Phase 8a step time benchmark ===");
+        println!(
+            "  shape: d_model=768, n_heads=12, n_kv_heads=12, n_layers=8, d_ff=3072, max_len=1024"
+        );
+        println!("  batch_size={batch_size}, measure_steps={measure_steps}");
+        println!("  per-step: {phase8a_per_step_ms:.1} ms");
+
+        println!("=== Phase 8b step time benchmark ===");
+        println!(
+            "  shape: d_model=768, n_heads=12, n_kv_heads=4, n_layers=8, d_ff=3072, max_len=1024"
+        );
+        println!("  batch_size={batch_size}, measure_steps={measure_steps}");
+        println!("  per-step: {phase8b_per_step_ms:.1} ms");
+
+        // Phase 8a per-step
+        let phase8b_speedup = phase8a_per_step_ms / phase8b_per_step_ms;
+        println!("  Phase 8b (n_kv_heads=4) vs Phase 8a (n_kv_heads=12): {phase8b_speedup:.2}x");
     }
 }

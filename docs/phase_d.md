@@ -11,7 +11,7 @@
 | D-1 | RMSNorm | ✅ 完了 | 18.98 → **18.77** (-1.1%) + ピーク 100 step 後ろ倒し (過学習耐性向上) |
 | D-3 | SwiGLU FFN | ✅ 完了 | 18.77 → **18.70** (-0.4%) + ms/step **-35%** + best 到達 **200 step 早期化** |
 | D-2 | RoPE | ✅ 完了 | floor は不変 (18.70 → 18.84)。 ただし early step で **-10〜22%** の収束加速 |
-| D-4 | MQA / GQA | 見送り | 推論速度のみで val_ppl 影響は小。 KV cache 未実装のため効果検証が困難 |
+| D-4 | MQA / GQA | 実施中 | 推論速度のみで val_ppl 影響は小。 KV cache 未実装のため効果検証が困難 |
 
 順序が D-1 → D-3 → D-2 になっているのは:
 - D-1 (RMSNorm) と D-3 (SwiGLU) は他レイヤーへの影響が小さく **独立検証可能**
@@ -346,6 +346,52 @@ matmul 主体の計算量に対し十分小さい。 事前予想 `+5〜10%` の
 
 短い max_len (256) では floor 改善は出ないが、 **RoPE の本領は max_len 拡張時の汎化** にあるため、 Phase 5-2 (max_len 512 化)
 での再評価で本評価を確定する。 また学習効率の高さは Phase 5 以降のサブフェーズで **early stopping 戦略** に活かせる。
+
+---
+
+## Phase D-4: MQA / GQA
+GQA は MHA (Multi Head Attention) の自然な拡張で、メモリ削減と品質のトレードオフを n_kv_heads 一つで制御できます。
+
+```
+MHA: Q heads=8,K heads=8, V heads=8 -> KV head を全 Q head が独立に持つ
+GQA: Q heads=8,K heads=2, V heads=2 -> 4つの Q head が 1 KV head を共有
+MQA: Q heads=8,K heads=1, V heads=1 -> 全 Q head が 同一 KV head を共有
+```
+
+### 実装
+- `src/multi_head_attention.rs` の `MultiHeadAttention` 構造体に `n_kv_heads` `d_kv_model` を追加し、`qkv_*` を `q_*` と `kv_*` に分離
+
+### 設定
+`Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd()` に `n_kv_heads=4` を設定した`Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd_gqa()` を追加。
+run_name は `phase8b_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd`。
+
+### ベンチマーク結果
+`#[test] bench_phase8_step_time` (`cargo test --release bench_phase8_step_time -- --nocapture --ignored`)
+n_kv_heads_12, n_kv_heads_4 を batch_size=2 で 3 step 計測。
+
+`n_kv_heads_12` : d_model=768, n_heads=12, n_kv_heads=12, n_layers=8, d_ff=3072, max_len=1024
+`n_kv_heads_4` : d_model=768, n_heads=4, n_kv_heads=12, n_layers=8, d_ff=3072, max_len=1024
+
+| パラメータ | per-step (batch=2) |speedup|
+|------|--------------------|----------|
+| n_kv_heads_12 | ~1875.1 ms | (baseline) |
+| n_kv_heads_4 | ~1701.2 ms | **1.09x** |
+
+
+### val_loss / val_ppl 推移 ( 構成比較)
+
+| step | n_kv_heads_12 (val_loss/val_ppl/ms_per_step) | **n_kv_heads_4 (val_loss/val_ppl/ms_per_step)** |
+|------|-----------|------------|
+| 500  | xx | **xx** |
+| 1000  | xx | **xx** |
+| 1500  | xx | **xx** |
+
+
+### 結論
+
+- ✅ **品質**: xxx (val_ppl -xxx%)
+- ✅ **速度**: **高速化** (per-step -x%)
+
 
 ---
 

@@ -1,4 +1,3 @@
-use crate::multi_head_attention::MultiHeadAttention;
 use crate::adam_w::AdamW;
 use crate::checkpoint::Checkpointable;
 use crate::checkpoint::WeightMap;
@@ -8,6 +7,7 @@ use crate::feed_forward::FeedForwardKind;
 use crate::feed_forward::load_feed_forward;
 use crate::kv_cache::KvCache;
 use crate::matrix::Matrix;
+use crate::multi_head_attention::MultiHeadAttention;
 use crate::normalization::Normalization;
 use crate::normalization::NormalizationKind;
 use crate::normalization::load_normalization;
@@ -32,6 +32,7 @@ impl TransformerBlock {
     pub fn new(
         d_model: usize,
         n_heads: usize,
+        n_kv_heads: usize,
         d_ff: usize,
         dropout_p: f32,
         normalization_kind: NormalizationKind,
@@ -39,7 +40,7 @@ impl TransformerBlock {
         rope: Option<Rope>,
     ) -> Self {
         Self {
-            mha: MultiHeadAttention::new(d_model, n_heads, rope),
+            mha: MultiHeadAttention::new(d_model, n_heads, n_kv_heads, rope),
             norm1: load_normalization(normalization_kind, d_model),
             drop_attn: Dropout::new(dropout_p),
             ffn: load_feed_forward(feed_forward_kind, d_model, d_ff),

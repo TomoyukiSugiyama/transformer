@@ -160,9 +160,16 @@ Phase 8-1 [A~C] (コーパス) → 8-1 [D] (tokenizer) → 8-1 [E] (model) の�
       ```
     - 意味的一貫性の欠如はまだ残る
 
-### Phase 8-2 / 8-3 (将来): bf16 mixed precision + GPT-2 Small Compact
+### Phase 8-2 : bf16 mixed precision (未実施)
+AXM コアの実測スループットは、bf16 が fp16 と同等、fp32 の2倍程度と bf16 の最適化パスが fp16 ほどに成熟していないことに加えて、harf クレートの bf16 はAccelerate の cblas_sgemm と直接繋がらず、自前で f32 にキャスト- > matmul -> bf16 に戻すラッパーが必要となり、キャストオーバーヘッドが実測改善を食い潰す可能性がある、
+CPU のままで試すと最大 25~40 % の改善ですが CPU 単独では実装コストに見合わない可能性が高く、GPU 移行に合わせて導入を検討する。
+Metal (GPU) での改善率は ~70~80% が期待できます。
 
 詳細は [`docs/roadmap.md`](roadmap.md) を参照。
+
+### Phase 8-3 : GQA
+
+詳細は [`docs/phase_d.md`](phase_d.md) を参照。
 
 ## 実装メモ
 

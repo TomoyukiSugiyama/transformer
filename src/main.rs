@@ -139,6 +139,7 @@ struct Config {
     positional_encoding_kind: PositionalEncodingKind,
     d_model: usize,
     n_heads: usize,
+    n_kv_heads: usize,
     d_ff: usize,
     n_layers: usize,
     max_len: usize,
@@ -188,6 +189,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 256,
             n_heads: 8,
+            n_kv_heads: 8,
             d_ff: 1024,
             n_layers: 4,
             max_len: 128,
@@ -226,6 +228,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 384,
             n_heads: 6,
+            n_kv_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 256,
@@ -271,6 +274,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Sinusoidal,
             d_model: 384,
             n_heads: 6,
+            n_kv_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 256,
@@ -313,6 +317,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Rope,
             d_model: 384,
             n_heads: 6,
+            n_kv_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 256,
@@ -358,6 +363,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Rope,
             d_model: 384,
             n_heads: 6,
+            n_kv_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 512,
@@ -421,6 +427,7 @@ impl Config {
             positional_encoding_kind: PositionalEncodingKind::Rope,
             d_model: 384,
             n_heads: 6,
+            n_kv_heads: 6,
             d_ff: 1536,
             n_layers: 6,
             max_len: 512,
@@ -453,6 +460,7 @@ impl Config {
         cfg.run_name = "phase5d_aozora_meiji_taisho_d512_n6_char_rms_swiglu_rope_max512";
         cfg.d_model = 512;
         cfg.n_heads = 8;
+        cfg.n_kv_heads = 8;
         cfg.d_ff = 2048;
         cfg.lr_max = 7e-4;
         cfg.lr_min = 7e-5;
@@ -478,6 +486,7 @@ impl Config {
         cfg.run_name = "phase5d_aozora_meiji_taisho_d768_n8_char_rms_swiglu_rope_max512";
         cfg.d_model = 768;
         cfg.n_heads = 12;
+        cfg.n_kv_heads = 12;
         cfg.d_ff = 3072;
         cfg.batch_size = 16;
         cfg.lr_max = 5e-4;
@@ -624,6 +633,7 @@ impl Config {
         // モデル拡大: d 512→768, n_heads 8→12, d_ff 2048→3072, n_layers 6→8 (~21M → ~50M params)。
         cfg.d_model = 768;
         cfg.n_heads = 12;
+        cfg.n_kv_heads = 12;
         cfg.d_ff = 3072;
         cfg.n_layers = 8;
 
@@ -645,6 +655,22 @@ impl Config {
         cfg.save_every = 500;
         cfg.val_every = 500;
 
+        cfg
+    }
+
+    /// Phase 8-2 : n_kv_heads 4 Phase 8-1 [E] と n_kx_heads 以外は同形状のモデル
+    /// 
+    /// 期待:
+    /// - val_ppl/BPC は Phase 8-1 [E] と同等。
+    /// - ベンチマークの結果は 8-10% 程度の改善であったことから、実際の学習時間に落とし込むと 4-5% 程度の改善を期待する。
+    /// 計算量見積:
+    /// - per-step 想定: Phase 8-1 [E] (ave. 16.7 s/step) から (15.197 ~ 15.364 s/step)
+    #[allow(dead_code)]
+    fn aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd_gqa() -> Self {
+        let mut cfg = Self::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
+        cfg.run_name =
+            "phase8b_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd";
+        cfg.n_kv_heads = 4;
         cfg
     }
 
@@ -676,26 +702,33 @@ impl Config {
     }
 }
 fn main() {
+    // Phase 8-b 実験: GQA 高速化
+    //   - shape: n_kv_heads 4, その他 Phase 8-1 と同形状
+    let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd_gqa();
+    training_and_inference(&cfg);
+
     // Phase 8-1 [E]: 混合コーパス (Aozora 5M + Wikipedia 978M = 983M chars) + CharBPE 32K + 50M params (d=768, n=8)。
     //   - corpus: corpus/aozora_wikipedia_mixed.txt (約 200x の拡大、 Chinchilla 則寄せ)
     //   - tokenizer: tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin (vocab=32,009、 chars/token Aozora 1.795 / Wiki 1.873)
-    //   - shape: d_model 768, n_heads 12, d_ff 3072, n_layers 8 (Phase 5-4c 予約スケール)
+    //   - shape: d_model 768, n_heads 12, n_kv_heads 12, d_ff 3072, n_layers 8 (Phase 5-4c 予約スケール)
     //   - LR: WSD (warmup 500 + stable 8000 + decay 1500 = 10,000)、 lr_max 5e-4 (50M params 用に 7e-4 → 下げ)
     //   - 観測: log 50 step / save+val 500 step (長期 run のため間隔拡大)
     //   - 計算量見積: ~17-20s/step × 10,000 = ~50 時間 ≈ 2 日 (M1 Max + Accelerate)
     //   起動コマンド (確認用 dry run 推奨):
     //     cargo run --release 2>&1 | tee logs/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd.log
     //   起動前チェック: tokenizer cache hit を必ず確認 (cache miss だと 110 分の BPE 再訓練が走る)。
-    let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
-    // training_and_inference(&cfg);  // ← 起動するときはコメントを外す
+    //   結果: best step=10000 val_loss 3.600075, val_ppl 36.6010, BPC 3.1334 (val 基準)。
+    //         Phase 6-a (BPC 3.76) から大幅に改善。
+    // let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd();
+    // training_and_inference(&cfg);
     // training_from_checkpoint(
     //     &cfg,
     //     "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/step_006000.bin",
     // );
-    inference_from_checkpoint(
-        &cfg,
-        "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/best.bin",
-    );
+    // inference_from_checkpoint(
+    //     &cfg,
+    //     "checkpoints/phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd/best.bin",
+    // );
 
     // 起動前 dry run: tokenizer cache hit と corpus サイズだけ確認したい場合は次行のみ有効化:
     // bench_tokenizer_with_cache(&cfg);
@@ -851,10 +884,11 @@ fn run_training_loop(
 
     println!("# run_name={}", cfg.run_name);
     println!(
-        "# tokenizer={:?}, d_model={}, n_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}, dropout={}, wd={}, beta2={}",
+        "# tokenizer={:?}, d_model={}, n_heads={}, n_kv_heads={}, d_ff={}, n_layers={}, max_len={}, vocab_size={}, dropout={}, wd={}, beta2={}",
         model.tokenizer_kind(),
         cfg.d_model,
         cfg.n_heads,
+        cfg.n_kv_heads,
         cfg.d_ff,
         cfg.n_layers,
         cfg.max_len,
@@ -1007,6 +1041,7 @@ fn training_and_inference(cfg: &Config) {
         cfg.positional_encoding_kind,
         cfg.d_model,
         cfg.n_heads,
+        cfg.n_kv_heads,
         cfg.d_ff,
         cfg.n_layers,
         cfg.max_len,
