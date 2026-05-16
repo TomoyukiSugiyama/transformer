@@ -492,7 +492,7 @@ with-cache の per-token 時間は **max_new によらずほぼ一定 (~4 ms)** 
 
 > **進捗注記** (2026-05-14):
 > - **5-4b (d=512, n=8, ~26M)** は単独実行を見送り。 Phase 5-4a → Phase 6-a (CharBPE) → Phase 6-d (max_len 1024 + WSD) → Phase 7-a (v2 corpus + special token) で 5-4a 形状を保ったまま改善を進めたため、 d 増加なしの深さ単独拡大はスキップ。
-> - **5-4c (d=768, n=8, ~50M)** は **Phase 8-1 [E]** で実装。 ただし Phase 5 単独の評価ではなく、 **Wikipedia 978M char 追加 + CharBPE 32K 再訓練** とセットで起動する。 詳細は [`docs/phase8.md`](phase8.md) を参照。
+> - **5-4c (d=768, n=8, ~127M)** は **Phase 8-1 [E]** で実装。 ただし Phase 5 単独の評価ではなく、 **Wikipedia 978M char 追加 + CharBPE 32K 再訓練** とセットで起動する。 詳細は [`docs/phase8.md`](phase8.md) を参照。
 >   - run_name: `phase8a_aozora_wikipedia_mixed_d768_n8_charbpe32k_rms_swiglu_rope_max1024_wsd`
 >   - 想定: per-step ~17-20s、 end_step 10,000 → 完走 ~50h
 >
@@ -501,7 +501,7 @@ with-cache の per-token 時間は **max_new によらずほぼ一定 (~4 ms)** 
 ### 仮説
 
 10.7M params は日本語の複雑さ (漢字 3700 + 活用 + 敬語) を捉えるには小さい。
-GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので、 まずは 20-50M を目指す。
+GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので、 20-127M を目指す。
 
 ### 段階的検証 (Config 実装済)
 
@@ -564,7 +564,7 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 - **学習の不安定化**: 5-4c で発散したら `lr_max` をさらに 3e-4 まで下げる
 - **過学習の再現**: コーパスが 3-4 倍に増えるので 5-4a-b では問題ない予想だが、 5-4c は容量過剰の可能性
   あり。 `dropout` 0.2 → 0.3、 `weight_decay` 0.1 → 0.15 を試す
-- **char-level の限界**: 50M params + 4M char では BPE/SentencePiece の方が効率的になる可能性。
+- **char-level の限界**: 127M params + 4M char では BPE/SentencePiece の方が効率的になる可能性。
   Phase 5-4c の結果次第で Phase 6 (BPE 系) を検討
 
 ---
@@ -582,7 +582,7 @@ GPT-2 small (124M params) ですら英語の流暢さに留まる規模なので
 | + Phase 6-d (CharBPE 8K, d=512, max_len=1024 + WSD + Phase 7-1/7-2) | — (token 単位差) | val_ppl 71.81、 **BPC 3.74 (-0.6% vs 6-a, full-corpus 基準)** ※ log の val 基準値は 4.22 | 長文一貫性向上、 戯曲混入は未解消 | +7h 41min |
 | + Phase 7-a (CharBPE 8K + clean v2 corpus + 作家・戯曲 special token) | — | val_ppl 77.04、 **BPC 4.291 (val 基準, Phase 6-d 4.22 比 +1.7%)** | 戯曲混入と作家ヘッダ生成の構造的解消、 作家別文体は再現 | +6h 44min |
 | + 5-4b (d_model 512, n_layers 8, ~26M params) | 15-16 | ⛔ 未実行 (Phase 6/7 で 5-4a 形状の改善継続を優先) | — | — |
-| + **Phase 8-1 [E]** (5-4c の実体化, d=768, n=8, ~50M params, **CharBPE 32K + Aozora+Wiki 983M char**) | BPC 3.5-3.8 (Phase 7-a 4.29 比 -15〜-17%) | val_ppl 36.60 BPC 3.13 ✅ **期待を大幅更新(PBC 基準,Phase 7-a 4.29比 -27%)** | Wikipedia 由来の知識・人名・カタカナ概念の取込、 文学的文体の維持 | +46h 30min |
+| + **Phase 8-1 [E]** (5-4c の実体化, d=768, n=8, ~127M params, **CharBPE 32K + Aozora+Wiki 983M char**) | BPC 3.5-3.8 (Phase 7-a 4.29 比 -15〜-17%) | val_ppl 36.60 BPC 3.13 ✅ **期待を大幅更新(PBC 基準,Phase 7-a 4.29比 -27%)** | Wikipedia 由来の知識・人名・カタカナ概念の取込、 文学的文体の維持 | +46h 30min |
 
 > **5-3 が想定外悪化したことを踏まえ、 5-4 系の期待値も上方修正 (=val_ppl の絶対値を高めに)** している。
 > ベースライン (5-3 の 18.71) からの **改善率** で評価する方が妥当。 各サブフェーズの結果次第で計画を再調整。

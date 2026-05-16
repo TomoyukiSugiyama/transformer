@@ -9,7 +9,7 @@
 
 | 軸 | 本実装 | SoTA (2026 年 5 月時点) |
 |----|-------|----------------------|
-| パラメータ規模 | 10M-50M | 数十 B〜1 T (LLaMA 3.1 405B, Claude/Gemini クラス) |
+| パラメータ規模 | 10M-127M | 数十 B〜1 T (LLaMA 3.1 405B, Claude/Gemini クラス) |
 | ハードウェア | M1 Max CPU + Apple Accelerate / matrixmultiply | 数千 GPU (H100 / B200 / TPU v5p) |
 | フレームワーク | なし (Rust + 自前 matmul + 自前 autograd) | PyTorch / JAX + Megatron / DeepSpeed |
 | 学習コーパス | 1〜8 M char (青空文庫) | 数兆〜十数兆 token (CommonCrawl + web + code + filtering) |
@@ -31,10 +31,10 @@
 | **LR スケジューラ** | Warmup (線形) + Cosine Decay | [`lr_scheduler.rs`](../src/lr_scheduler.rs) | Cosine / Cosine restarts / **WSD** (Warmup-Stable-Decay, MiniCPM 系) | WSD / Restarts 未実装 (training run が短いので影響は小) |
 | **Tokenizer** | BPE (byte-level, 4000 vocab) + Char-level (3720-5220 vocab) 切替 | [`bpe_tokenizer.rs`](../src/bpe_tokenizer.rs) / [`char_tokenizer.rs`](../src/char_tokenizer.rs) | SentencePiece / tiktoken (cl100k / o200k / Gemini), 32k-200k vocab | 語彙規模が小さい。 Byte-fallback / pre-tokenization rule なし |
 | **Attention 計算** | 標準 Scaled Dot-Product (O(n²) memory) | [`multi_head_attention.rs`](../src/multi_head_attention.rs) | **FlashAttention 2/3** (IO-aware, O(n) memory, GPU 専用) | FlashAttention 未実装 (CPU では効果も限定的だが、 長 seq でメモリ逼迫) |
-| **モデル規模** | 最大 ~50M params (d_model=768, n_layers=8) | [`main.rs`](../src/main.rs) `Config::aozora_meiji_taisho_d768_max512` | LLaMA 3: 8B-405B, Claude / Gemini: 数百 B-1 T | **桁違いのスケール差** (~3 桁) — 学習目的としては適切 |
+| **モデル規模** | 最大 ~127M params (d_model=768, n_layers=8) | [`main.rs`](../src/main.rs) `Config::aozora_meiji_taisho_d768_max512` | LLaMA 3: 8B-405B, Claude / Gemini: 数百 B-1 T | **桁違いのスケール差** (~3 桁) — 学習目的としては適切 |
 | **Dropout** | Inverted dropout (train/eval 切替) | [`dropout.rs`](../src/dropout.rs) | LLaMA / Mistral 系では `dropout=0` (データ量で代替) | nanoGPT 準拠で適切 (小規模コーパスでは必要)。 Attention 内 dropout は未実装 |
 | **KV Cache** | ✅ **実装済** (RoPE 適用後 K + 未回転 V を per-layer で保持) | [`kv_cache.rs`](../src/kv_cache.rs), [`docs/kv_cache.md`](kv_cache.md) | フロンティアモデル全てで必須 | ✅ **同等**。 per-token 計算量が `O(n²·d) → O(n·d)`。 残: KV truncation (sliding window) は未対応 |
-| **MoE (Mixture of Experts)** | 未実装 | — | Mixtral, DeepSeek-V3, Gemini 2.5 (sparse MoE 8 of 64 等) | アーキ的に大きなギャップだが、 50M params 規模では本質的に不要 |
+| **MoE (Mixture of Experts)** | 未実装 | — | Mixtral, DeepSeek-V3, Gemini 2.5 (sparse MoE 8 of 64 等) | アーキ的に大きなギャップだが、 127M params 規模では本質的に不要 |
 | **チェックポイント** | カスタムバイナリ (`best.bin` / `latest.bin` / `inference.bin`) | [`checkpoint.rs`](../src/checkpoint.rs) | **SafeTensors** (HF 標準), GGUF (llama.cpp 系) | HuggingFace エコシステム非対応。 互換 loader は今後の検討 |
 | **並列化** | rayon (CPU 並列) + Apple Accelerate / matrixmultiply | [`docs/performance.md`](performance.md) | FSDP, Tensor Parallel, Pipeline Parallel (GPU 分散) | GPU 非対応、 シングルノード CPU のみ |
 | **Autograd** | **手動実装** (全レイヤー backward 手書き) | 各 `*.rs` の `backward` 関数 | PyTorch / JAX の自動微分 | ❤️ **教育的価値が極めて高い**。 SoTA とは目的が異なる |
@@ -54,7 +54,7 @@
 7. **bf16 サポート** — M1 系の bf16 AMX を使った matmul 高速化
 
 **意図的に優先度を下げているもの**:
-- **MoE**: 50M 規模では理論的にも実用的にも効果薄い
+- **MoE**: 127M 規模では理論的にも実用的にも効果薄い
 - **GPU 対応 / 分散最適化**: 学習用 OSS としての価値 (1 マシンで完結する読みやすさ) を毀損する
 - **量子化**: 教育的価値が低く、 f32 で完結する方が読者に優しい
 
