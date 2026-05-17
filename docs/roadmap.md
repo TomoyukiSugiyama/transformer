@@ -13,7 +13,7 @@
 | **RMSNorm** | val_ppl -1.1% (18.98 → 18.77) / 過学習開始を 100 step 後ろ倒し / 速度差は出ず | `layer_normalization` を差し替え | ✅ 完了 ([Phase D-1](phase_d.md)) |
 | **SwiGLU FFN** | val_ppl -0.4% (18.77 → 18.70) + ms/step **-35%** + best 到達 200 step 早期化 | `feed_forward_network` を差し替え | ✅ 完了 ([Phase D-3](phase_d.md)) |
 | **RoPE** | floor 不変 (+0.7%) / early step **-10〜22%** の収束加速 / ms/step +4% | `MultiHeadAttention` 内に組込、 `pe` を Option 化 | ✅ 完了 ([Phase D-2](phase_d.md)) |
-| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 | 実施中 ([Phase D-4](phase_d.md)) |
+| **MQA / GQA** | 推論時 KV cache を 1/n_heads に圧縮 | `multi_head_attention` の K/V 次元 |  ✅ 完了 ([Phase D-4](phase_d.md)) |
 
 **累積効果**: LN+GELU baseline → RMS+SwiGLU+RoPE で **val_ppl -1.5% / best 到達時間 -41%**。
 詳細結果は [docs/phase_d.md](phase_d.md) を参照。

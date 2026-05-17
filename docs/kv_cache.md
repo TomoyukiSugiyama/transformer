@@ -201,7 +201,7 @@ RoPE は位置 `pos` で K, Q を回転する。 KV cache では:
 | `cur_len` が `max_len` に到達 | early-stop | sliding window で末尾 `max_len` 個に切詰め |
 | Sinusoidal PE の long-seq 外挿 | `max_len` 固定 | 実用上は RoPE を使うので低優先 |
 | FlashAttention | ✅ 完了 [`performance.md`](performance.md) | KV cache とは独立に効く最適化 |
-| MQA / GQA | 未対応 | KV cache 容量を `1/n_heads` に削減できる、 容量がボトルネックになったら検討 |
+| MQA / GQA | ✅ 完了 [`phase_d.md`](phase_d.md) | KV cache 容量を `1/n_heads` に削減できる、 容量がボトルネックになったら検討 |
 
 ## 既存推論パスとの関係
 

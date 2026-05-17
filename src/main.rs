@@ -658,7 +658,7 @@ impl Config {
         cfg
     }
 
-    /// Phase 8-2 : n_kv_heads 4 Phase 8-1 [E] と n_kx_heads 以外は同形状のモデル
+    /// Phase 8-3 : n_kv_heads 4 Phase 8-1 [E] と n_kx_heads 以外は同形状のモデル
     /// 
     /// 期待:
     /// - val_ppl/BPC は Phase 8-1 [E] と同等。
@@ -702,12 +702,12 @@ impl Config {
     }
 }
 fn main() {
-    // Phase 8-b 実験: GQA 高速化
+    // Phase 8-3 実験: GQA 高速化
     //   - shape: n_kv_heads 4, その他 Phase 8-1 と同形状
     let cfg = Config::aozora_wikipedia_mixed_d768_n8_charbpe32k_max1024_wsd_gqa();
     training_and_inference(&cfg);
 
-    // Phase 8-1 [E]: 混合コーパス (Aozora 5M + Wikipedia 978M = 983M chars) + CharBPE 32K + 50M params (d=768, n=8)。
+    // Phase 8-1 [E]: 混合コーパス (Aozora 5M + Wikipedia 978M = 983M chars) + CharBPE 32K + 50M params (d=768, n=8)。 ✅ 完了
     //   - corpus: corpus/aozora_wikipedia_mixed.txt (約 200x の拡大、 Chinchilla 則寄せ)
     //   - tokenizer: tokenizers/charbpe_v32010_aozora_wikipedia_mixed.bin (vocab=32,009、 chars/token Aozora 1.795 / Wiki 1.873)
     //   - shape: d_model 768, n_heads 12, n_kv_heads 12, d_ff 3072, n_layers 8 (Phase 5-4c 予約スケール)
