@@ -3,6 +3,31 @@
 Rust で書かれた Transformer (decoder-only) 言語モデルの学習・推論実装。
 外部 ML フレームワークに依存せず、 行列演算から自前で実装している学習用プロジェクト。
 
+> **🎉 このプロジェクトはクローズしました (2026-05)**
+>
+> Rust による Transformer (decoder-only) の CPU 実装が完了し、本リポジトリの開発を終了します。
+> GPU 移行・本格スケールアップは **[transformer-gpu](https://github.com/TomoyukiSugiyama/transformer-gpu)** で継続します。
+
+## プロジェクト総括
+
+外部 ML フレームワークを一切使わず、行列演算から自前実装した Rust の Transformer 学習・推論プロジェクト。
+Phase 2（Tiny Shakespeare / 英語）から Phase 8（日本語 Wikipedia 983M char / ~124.7M params）まで段階的にスケールアップし、
+以下の主要マイルストーンを達成した。
+
+| Phase | 達成内容 | 主な指標 |
+|-------|---------|---------|
+| Phase 2-3 | BPE トークナイザ・nanoGPT 相当実装 | nanoGPT 比 val_loss -3.4% |
+| Phase 4 | 青空文庫（日本語）対応 | — |
+| Phase D | RMSNorm + SwiGLU + RoPE 導入 | val_ppl -1.5% / 学習時間 -41% |
+| Phase 6 | Unicode char-level BPE (CharBPE) 導入 | BPC 3.74（max=1024 + WSD）|
+| Phase 7 | コーパス前処理 + special token + 1.59x 高速化 | — |
+| Phase 8 | Wikipedia 混合 983M char + d=768 ~124.7M params | val_loss 4.18 / BPC 3.64 @step 3000 |
+| Phase 8b | GQA 導入 | 速度 +5.6%、品質ほぼ同等（BPC 差 <0.03）|
+
+**CPU 実装の限界と次のステップ**: Apple Silicon (M シリーズ) + Accelerate Framework での最適化を突き詰めたが、
+さらなるスケールアップには GPU が必要。本実装で得た設計知見（RoPE / RMSNorm / SwiGLU / GQA / KV Cache 等）を
+[transformer-gpu](https://github.com/TomoyukiSugiyama/transformer-gpu) に引き継ぐ。
+
 ## アーキテクチャ
 
 ### 全体像
