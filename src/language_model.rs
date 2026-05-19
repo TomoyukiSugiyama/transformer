@@ -361,7 +361,7 @@ impl LanguageModel {
         // 起点となる context (max_len を超えていたら末尾を切る)。
         let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
 
-        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+        let mut caches = self.transformer.init_kv_caches(self.max_len);
 
         // Prefill: 最後の token 以外を順に流して cache を埋める (logits は捨てる)。
         // 最後の token は logits を取って sampling に回すため、 別扱い。
@@ -403,7 +403,7 @@ impl LanguageModel {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
-        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+        let mut caches = self.transformer.init_kv_caches(self.max_len);
 
         for &tid in &prompt_ctx[..prompt_ctx.len() - 1] {
             let _ = self.forward_step_last(tid, &mut caches);
@@ -441,7 +441,7 @@ impl LanguageModel {
         let mut ids = self.tokenizer.encode_prompt(prompt_text);
         let eos_id = self.tokenizer.eos_id();
         let prompt_ctx: Vec<usize> = self.context_window(&ids).to_vec();
-        let mut caches = self.transformer.init_kv_caches(self.max_len, self.d_model);
+        let mut caches = self.transformer.init_kv_caches(self.max_len);
 
         for &tid in &prompt_ctx[..prompt_ctx.len() - 1] {
             let _ = self.forward_step_last(tid, &mut caches);
@@ -737,7 +737,7 @@ mod kv_cache_tests {
         let ids = model.tokenizer.encode_prompt("hello world");
         let mut caches = model
             .transformer
-            .init_kv_caches(model.max_len, model.d_model);
+            .init_kv_caches(model.max_len);
 
         // ids の各 prefix の最終位置 logits を 2 通りで計算
         for end in 1..=ids.len() {

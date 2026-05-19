@@ -19,6 +19,9 @@ use crate::{
 pub struct Transformer {
     blocks: Vec<TransformerBlock>,
     final_norm: Box<dyn Normalization>,
+    d_model: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
 }
 
 impl Transformer {
@@ -58,6 +61,9 @@ impl Transformer {
                 })
                 .collect(),
             final_norm: load_normalization(normalization_kind, d_model),
+            d_model,
+            n_heads,
+            n_kv_heads,
         }
     }
 
@@ -85,9 +91,12 @@ impl Transformer {
 
     /// 推論専用: 各層の `KvCache` をプロンプト用に作成する。
     /// 容量は `max_len` (= 学習時の context window) に揃える。
-    pub fn init_kv_caches(&self, max_len: usize, d_model: usize) -> Vec<KvCache> {
+    pub fn init_kv_caches(&self, max_len: usize) -> Vec<KvCache> {
+        let d_head = self.d_model / self.n_heads;
+        let d_kv_model = self.n_kv_heads * d_head;
+
         (0..self.blocks.len())
-            .map(|_| KvCache::new(max_len, d_model))
+            .map(|_| KvCache::new(max_len, d_kv_model))
             .collect()
     }
 
@@ -131,6 +140,9 @@ impl Transformer {
 impl Checkpointable for Transformer {
     fn to_weight_map(&self) -> WeightMap {
         let mut map = WeightMap::new();
+        map.insert_scalar("d_model", self.d_model as u64);
+        map.insert_scalar("n_heads", self.n_heads as u64);
+        map.insert_scalar("n_kv_heads", self.n_kv_heads as u64);
         map.insert_scalar("n_layers", self.blocks.len() as u64);
         for (i, block) in self.blocks.iter().enumerate() {
             map.merge(&format!("blocks.{i}"), block.to_weight_map());
@@ -140,6 +152,17 @@ impl Checkpointable for Transformer {
     }
 
     fn from_weight_map(&mut self, map: &WeightMap) -> Result<()> {
+        let d_model = map.get_scalar("d_model")? as usize;
+        let n_heads = map.get_scalar("n_heads")? as usize;
+        let n_kv_heads = map.get_scalar("n_kv_heads")? as usize;
+
+        if n_heads != self.n_heads
+            || n_kv_heads != self.n_kv_heads
+            || d_model != self.d_model
+        {
+            return Err(Error::new(ErrorKind::InvalidData, "transformer config mismatch"));
+        }
+
         let n_layers = map.get_scalar("n_layers")? as usize;
         if n_layers != self.blocks.len() {
             return Err(Error::new(
